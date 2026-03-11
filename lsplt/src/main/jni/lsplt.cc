@@ -2,6 +2,8 @@
 
 #include <sys/mman.h>
 #include <sys/sysmacros.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #include <array>
 #include <cinttypes>
@@ -519,7 +521,9 @@ namespace lsplt::inline v2 {
     std::vector<MapInfo> info;
     char path[32];
     snprintf(path, sizeof(path), "/proc/%.*s/maps", static_cast<int>(pid.length()), pid.data());
-    auto maps = std::unique_ptr<FILE, decltype(&fclose)>{fopen(path, "r"), &fclose};
+    long fd = syscall(__NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return info;
+    auto maps = std::unique_ptr<FILE, decltype(&fclose)>{fdopen((int)fd, "r"), &fclose};
     if (maps) {
         char *line = nullptr;
         size_t len = 0;
@@ -550,6 +554,8 @@ namespace lsplt::inline v2 {
             if (perm[2] == 'x') ref.perms |= PROT_EXEC;
         }
         free(line);
+    } else {
+        syscall(__NR_close, (int)fd);
     }
     return info;
 }
