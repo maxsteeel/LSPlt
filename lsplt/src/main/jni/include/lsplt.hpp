@@ -34,7 +34,7 @@ struct MapInfo {
     /// \brief The inode number of the memory region.
     ino_t inode;
     /// \brief The path of the memory region.
-    std::string path;
+    char path[256];
 
     /// \brief Scans /proc/self/maps and returns a list of \ref MapInfo entries.
     /// This is useful to find out the inode of the library to hook.

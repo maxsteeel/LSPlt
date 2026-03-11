@@ -6,9 +6,10 @@
 #include <array>
 #include <cinttypes>
 #include <list>
-#include <map>
 #include <mutex>
 #include <vector>
+#include <algorithm>
+#include <cstring>
 
 #include "elf_util.hpp"
 #include "logging.hpp"
@@ -75,7 +76,7 @@ struct HookRequest {
     dev_t dev;
     ino_t inode;
     std::pair<uintptr_t, uintptr_t> offset_range;
-    std::string symbol;
+    char symbol[128];
     void *callback;
     void **backup;
 };
@@ -151,17 +152,21 @@ struct HookRequest {
  */
 
 struct HookInfo : public lsplt::MapInfo {
-    std::map<uintptr_t, uintptr_t> hooks;
+    std::vector<std::pair<uintptr_t, uintptr_t>> hooks;
     uintptr_t backup;
     std::unique_ptr<Elf> elf;
     bool self;
+
+    HookInfo(lsplt::MapInfo&& map, bool is_self)
+        : lsplt::MapInfo(std::move(map)), backup(0), elf(nullptr), self(is_self) {}
+
     [[nodiscard]] bool Match(const HookRequest &info) const {
         return info.dev == dev && info.inode == inode && offset >= info.offset_range.first &&
                offset < info.offset_range.second;
     }
 };
 
-class HookInfos : public std::map<uintptr_t, HookInfo, std::greater<>> {
+class HookInfos : public std::vector<HookInfo> {
 public:
     static auto CreateTargetsFromMemoryMaps(std::vector<lsplt::MapInfo> maps) {
         static ino_t kSelfInode = 0;
@@ -183,13 +188,12 @@ public:
             // and for offset == 0 it's an ELF header
             // and for offset != 0 it's what we hook
             // both of them should not be xom
-            if (!map.is_private || !(map.perms & PROT_READ) || map.path.empty() ||
+            if (!map.is_private || !(map.perms & PROT_READ) || map.path[0] == '\0' ||
                 map.path[0] == '[') {
                 continue;
             }
-            auto start = map.start;
             const bool self = map.inode == kSelfInode && map.dev == kSelfDev;
-            info.emplace(start, HookInfo{{std::move(map)}, {}, 0, nullptr, self});
+            info.emplace_back(std::move(map), self);
         }
         return info;
     }
@@ -197,7 +201,7 @@ public:
     // filter out ignored
     void Filter(const std::vector<HookRequest> &register_info) {
         for (auto iter = begin(); iter != end();) {
-            const auto &info = iter->second;
+            const auto &info = *iter;
             bool matched = false;
             for (const auto &reg : register_info) {
                 if (info.Match(reg)) {
@@ -207,8 +211,8 @@ public:
             }
             if (matched) {
                 LOGV("match hook info %s:%lu %" PRIxPTR " %" PRIxPTR "-%" PRIxPTR,
-                     iter->second.path.data(), iter->second.inode, iter->second.start,
-                     iter->second.end, iter->second.offset);
+                     info.path, info.inode, info.start,
+                     info.end, info.offset);
                 ++iter;
             } else {
                 iter = erase(iter);
@@ -219,14 +223,16 @@ public:
     void Merge(HookInfos &old) {
         // merge with old map info
         if (old.size() == 0) return;
-        for (auto &info : old) {
-            if (info.second.backup) {
-                erase(info.second.backup);
+        for (auto &old_info : old) {
+            if (old_info.backup) {
+                auto it = std::find_if(begin(), end(), [&](const HookInfo& hi){ return hi.start == old_info.backup; });
+                if (it != end()) erase(it);
             }
-            if (auto iter = find(info.first); iter != end()) {
-                iter->second = std::move(info.second);
-            } else if (info.second.backup) {
-                emplace(info.first, std::move(info.second));
+            auto iter = std::find_if(begin(), end(), [&](const HookInfo& hi){ return hi.start == old_info.start; });
+            if (iter != end()) {
+                *iter = std::move(old_info);
+            } else if (old_info.backup) {
+                push_back(std::move(old_info));
             }
         }
     }
@@ -302,11 +308,11 @@ public:
 
     bool PatchPLTEntry(uintptr_t addr, uintptr_t callback, uintptr_t *backup) {
         LOGV("hooking %p", reinterpret_cast<void *>(addr));
-        auto iter = lower_bound(addr);
+        auto iter = std::find_if(begin(), end(), [addr](const HookInfo& hi) {
+            return addr >= hi.start && addr < hi.end;
+        });
         if (iter == end()) return false;
-        // iter.first < addr
-        auto &info = iter->second;
-        if (info.end <= addr) return false;
+        auto &info = *iter;
         const auto len = info.end - info.start;
         if (!info.backup && !info.self) {
             // let os find a suitable address
@@ -351,11 +357,14 @@ public:
             *the_addr = callback;
             if (backup) *backup = the_backup;
             __builtin___clear_cache(PageStart(addr), PageEnd(addr));
+        } else {
+            LOGV("the address already has the expected callback, no need to patch");
         }
-        if (auto hook_iter = info.hooks.find(addr); hook_iter != info.hooks.end()) {
+        auto hook_iter = std::find_if(info.hooks.begin(), info.hooks.end(), [addr](const auto& p){ return p.first == addr; });
+        if (hook_iter != info.hooks.end()) {
             if (hook_iter->second == callback) info.hooks.erase(hook_iter);
         } else {
-            info.hooks.emplace(addr, the_backup);
+            info.hooks.push_back({addr, the_backup});
         }
         if (info.hooks.empty() && !info.self) {
             LOGV("restore %p from %p", reinterpret_cast<void *>(info.start),
@@ -404,7 +413,7 @@ public:
             const auto &reg = *iter;
             bool restored = false;
             for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
-                auto &info = info_iter->second;
+                auto &info = *info_iter;
                 if (info.hooks.size() == 0 || info.dev != reg.dev || info.inode != reg.inode) {
                     continue;
                 }
@@ -413,7 +422,7 @@ public:
                     // The `original_addr` is the Value: the original function ptr we backed up.
                     if (original_addr == reinterpret_cast<uintptr_t>(reg.callback)) {
                         LOGV("found matching hook for symbol [%s] at address %p.",
-                             reg.symbol.c_str(), reinterpret_cast<void *>(hooked_addr));
+                             reg.symbol, reinterpret_cast<void *>(hooked_addr));
                         restored = PatchPLTEntry(hooked_addr, original_addr, nullptr);
                         res = restored && res;
                         break;
@@ -422,7 +431,7 @@ public:
             }
 
             if (!restored) {
-                LOGW("no matched hook found to restore function [%s]", reg.symbol.c_str());
+                LOGW("no matched hook found to restore function [%s]", reg.symbol);
                 ++iter;
             } else {
                 iter = register_info.erase(iter);
@@ -438,7 +447,7 @@ public:
     bool ProcessRequest(std::vector<HookRequest> &register_info) {
         bool res = true;
         for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
-            auto &info = info_iter->second;
+            auto &info = *info_iter;
             for (auto iter = register_info.begin(); iter != register_info.end();) {
                 const auto &reg = *iter;
                 if (info.offset != iter->offset_range.first || !info.Match(reg)) {
@@ -448,13 +457,13 @@ public:
 
                 if (!info.elf) info.elf = std::make_unique<Elf>(info.start);
                 if (info.elf && info.elf->Valid()) {
-                    LOGV("finding symbol %s", iter->symbol.data());
+                    LOGV("finding symbol %s", reg.symbol);
                     auto possible_addr = info.elf->FindPltAddr(reg.symbol);
                     if (possible_addr.size() == 0) {
-                        LOGW("symbol %s not found in PLT table", iter->symbol.data());
+                        LOGW("symbol %s not found in PLT table", reg.symbol);
                         res = false;
                     } else {
-                        LOGV("patching PLT entry for %s", iter->symbol.data());
+                        LOGV("patching PLT entry for %s", reg.symbol);
                         for (auto addr : possible_addr) {
                             res = PatchPLTEntry(addr, reinterpret_cast<uintptr_t>(reg.callback),
                                                 reinterpret_cast<uintptr_t *>(reg.backup)) &&
@@ -470,7 +479,7 @@ public:
 
     bool CleanupAllHooks() {
         bool res = true;
-        for (auto &[_, info] : *this) {
+        for (auto &info : *this) {
             if (!info.backup) continue;
             for (auto &[addr, backup] : info.hooks) {
                 // store new address to backup since we don't need backup
@@ -508,8 +517,9 @@ namespace lsplt::inline v2 {
     constexpr static auto kPermLength = 5;
     constexpr static auto kMapEntry = 7;
     std::vector<MapInfo> info;
-    auto path = "/proc/" + std::string{pid} + "/maps";
-    auto maps = std::unique_ptr<FILE, decltype(&fclose)>{fopen(path.c_str(), "r"), &fclose};
+    char path[32];
+    snprintf(path, sizeof(path), "/proc/%.*s/maps", static_cast<int>(pid.length()), pid.data());
+    auto maps = std::unique_ptr<FILE, decltype(&fclose)>{fopen(path, "r"), &fclose};
     if (maps) {
         char *line = nullptr;
         size_t len = 0;
@@ -530,9 +540,11 @@ namespace lsplt::inline v2 {
                 continue;
             }
             while (path_off < read && isspace(line[path_off])) path_off++;
-            auto &ref = info.emplace_back(start, end, 0, perm[3] == 'p', off,
+            auto &ref = info.emplace_back(MapInfo{start, end, 0, perm[3] == 'p', off,
                                           static_cast<dev_t>(makedev(dev_major, dev_minor)), inode,
-                                          line + path_off);
+                                          {0}});
+            strlcpy(ref.path, line + path_off, sizeof(ref.path));
+
             if (perm[0] == 'r') ref.perms |= PROT_READ;
             if (perm[1] == 'w') ref.perms |= PROT_WRITE;
             if (perm[2] == 'x') ref.perms |= PROT_EXEC;
@@ -549,12 +561,11 @@ namespace lsplt::inline v2 {
     const std::unique_lock lock(g_hook_state_mutex);
     static_assert(std::numeric_limits<uintptr_t>::min() == 0);
     static_assert(std::numeric_limits<uintptr_t>::max() == -1);
-    [[maybe_unused]] const auto &info = g_pending_hooks.emplace_back(
-        dev, inode,
-        std::pair{std::numeric_limits<uintptr_t>::min(), std::numeric_limits<uintptr_t>::max()},
-        std::string{symbol}, callback, backup);
+    HookRequest req{dev, inode, {std::numeric_limits<uintptr_t>::min(), std::numeric_limits<uintptr_t>::max()}, {0}, callback, backup};
+    strlcpy(req.symbol, symbol.data(), sizeof(req.symbol));
+    g_pending_hooks.push_back(req);
 
-    LOGV("RegisterHook %lu %s", info.inode, info.symbol.data());
+    LOGV("RegisterHook %lu %s", req.inode, req.symbol);
     return true;
 }
 
@@ -563,13 +574,12 @@ namespace lsplt::inline v2 {
     if (dev == 0 || inode == 0 || symbol.empty() || !callback) return false;
 
     const std::unique_lock lock(g_hook_state_mutex);
-    static_assert(std::numeric_limits<uintptr_t>::min() == 0);
-    static_assert(std::numeric_limits<uintptr_t>::max() == -1);
-    [[maybe_unused]] const auto &info = g_pending_hooks.emplace_back(
-        dev, inode, std::pair{offset, offset + size}, std::string{symbol}, callback, backup);
+    HookRequest req{dev, inode, {offset, offset + size}, {0}, callback, backup};
+    strlcpy(req.symbol, symbol.data(), sizeof(req.symbol));
+    g_pending_hooks.push_back(req);
 
-    LOGV("RegisterHook %lu %" PRIxPTR "-%" PRIxPTR " %s", info.inode, info.offset_range.first,
-         info.offset_range.second, info.symbol.data());
+    LOGV("RegisterHook %lu %" PRIxPTR "-%" PRIxPTR " %s", req.inode, req.offset_range.first,
+         req.offset_range.second, req.symbol);
     return true;
 }
 
