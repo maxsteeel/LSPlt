@@ -202,24 +202,18 @@ public:
 
     // filter out ignored
     void Filter(const std::vector<HookRequest> &register_info) {
-        for (auto iter = begin(); iter != end();) {
-            const auto &info = *iter;
-            bool matched = false;
-            for (const auto &reg : register_info) {
-                if (info.Match(reg)) {
-                    matched = true;
-                    break;
-                }
-            }
+        // Optimized using erase-remove idiom to achieve O(N) complexity instead of O(N^2)
+        auto it = std::remove_if(begin(), end(), [&](const auto &info) {
+            bool matched = std::any_of(register_info.begin(), register_info.end(),
+                                       [&](const auto &reg) { return info.Match(reg); });
             if (matched) {
-                LOGV("match hook info %s:%lu %" PRIxPTR " %" PRIxPTR "-%" PRIxPTR,
-                     info.path, info.inode, info.start,
-                     info.end, info.offset);
-                ++iter;
-            } else {
-                iter = erase(iter);
+                LOGV("match hook info %s:%lu %" PRIxPTR " %" PRIxPTR "-%" PRIxPTR, info.path,
+                     info.inode, info.start, info.end, info.offset);
+                return false;
             }
-        }
+            return true;
+        });
+        erase(it, end());
     }
 
     void Merge(HookInfos &old) {
