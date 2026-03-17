@@ -407,34 +407,30 @@ public:
     bool RestoreFunction(std::vector<HookRequest> &register_info) {
         LOGV("restoring %zu functions", register_info.size());
         bool res = true;
-        for (auto iter = register_info.begin(); iter != register_info.end();) {
-            const auto &reg = *iter;
+        auto it = std::remove_if(register_info.begin(), register_info.end(), [&](const auto &reg) {
             bool restored = false;
             for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
                 auto &info = *info_iter;
-                if (info.hooks.size() == 0 || info.dev != reg.dev || info.inode != reg.inode) {
+                if (info.hooks.empty() || info.dev != reg.dev || info.inode != reg.inode) {
                     continue;
                 }
-                for (const auto &[hooked_addr, original_addr] : info.hooks) {
-                    // The `hooked_addr` is the Key: the address of the PLT entry.
-                    // The `original_addr` is the Value: the original function ptr we backed up.
-                    if (original_addr == reinterpret_cast<uintptr_t>(reg.callback)) {
-                        LOGV("found matching hook for symbol [%s] at address %p.",
-                             reg.symbol, reinterpret_cast<void *>(hooked_addr));
-                        restored = PatchPLTEntry(hooked_addr, original_addr, nullptr);
-                        res = restored && res;
-                        break;
-                    }
+                auto hook_it = std::find_if(info.hooks.begin(), info.hooks.end(),
+                                            [&](const auto &p) { return p.second == reinterpret_cast<uintptr_t>(reg.callback); });
+                if (hook_it != info.hooks.end()) {
+                    LOGV("found matching hook for symbol [%s] at address %p.",
+                         reg.symbol, reinterpret_cast<void *>(hook_it->first));
+                    restored = PatchPLTEntry(hook_it->first, hook_it->second, nullptr);
+                    res = restored && res;
+                    break;
                 }
             }
-
             if (!restored) {
                 LOGW("no matched hook found to restore function [%s]", reg.symbol);
-                ++iter;
-            } else {
-                iter = register_info.erase(iter);
             }
-        }
+            return restored;
+        });
+        register_info.erase(it, register_info.end());
+
         if (!res) {
             LOGV("fallback to address searching for %zu functions not restored",
                  register_info.size());
