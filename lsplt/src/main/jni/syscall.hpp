@@ -4705,6 +4705,7 @@ struct kernel_statx {
       LSS_SC_BODY(4, int, 8, d, type, protocol, sv);
     }
   #endif
+  #if !defined(__PPC__)
   #if defined(__NR_recvmsg)
     LSS_INLINE _syscall3(ssize_t, recvmsg, int, s, struct kernel_msghdr*, msg,
                          int, flags)
@@ -4727,6 +4728,7 @@ struct kernel_statx {
   #if defined(__NR_socketpair)
     LSS_INLINE _syscall4(int, socketpair, int, d, int, type, int, protocol,
                          int*, sv)
+  #endif
   #endif
   #if defined(__NR_socketcall)
     LSS_INLINE _syscall2(int,      _socketcall,    int,   c,
@@ -4817,11 +4819,11 @@ struct kernel_statx {
   #if defined(__NR_pipe2)
     LSS_INLINE _syscall2(int, pipe2, int *, pipefd, int, flags)
   #endif
-  /* TODO(csilvers): see if ppc can/should support this as well              */
   #if defined(__i386__) || defined(__ARM_ARCH_3__) ||                         \
       defined(__ARM_EABI__) ||                                                \
      (defined(__mips__) && _MIPS_SIM != _MIPS_SIM_ABI64) ||                   \
-     (defined(__s390__) && !defined(__s390x__))
+     (defined(__s390__) && !defined(__s390x__)) ||                            \
+     (defined(__PPC__) && !defined(__PPC64__))
     #define __NR__statfs64  __NR_statfs64
     #define __NR__fstatfs64 __NR_fstatfs64
     LSS_INLINE _syscall3(int, _statfs64,     const char*, p,
