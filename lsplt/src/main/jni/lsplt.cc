@@ -444,14 +444,11 @@ public:
 
     bool ProcessRequest(std::vector<HookRequest> &register_info) {
         bool res = true;
-        for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
-            auto &info = *info_iter;
-            for (auto iter = register_info.begin(); iter != register_info.end();) {
-                const auto &reg = *iter;
-                if (info.offset != iter->offset_range.first || !info.Match(reg)) {
-                    ++iter;
-                    continue;
-                }
+        auto iter = std::remove_if(register_info.begin(), register_info.end(), [&](const HookRequest &reg) {
+            bool processed = false;
+            for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
+                auto &info = *info_iter;
+                if (info.offset != reg.offset_range.first || !info.Match(reg)) continue;
 
                 if (!info.elf) info.elf = std::make_unique<Elf>(info.start);
                 if (info.elf && info.elf->Valid()) {
@@ -469,9 +466,12 @@ public:
                         }
                     }
                 }
-                iter = register_info.erase(iter);
+                processed = true;
+                break;
             }
-        }
+            return processed;
+        });
+        register_info.erase(iter, register_info.end());
         return res;
     }
 
