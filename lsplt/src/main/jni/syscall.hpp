@@ -3273,29 +3273,32 @@ struct kernel_statx {
                                    void *newtls, int *child_tidptr) {
       long __ret, __err;
       {
-        register int (*__fn)(void *)    __asm__ ("r8")  = fn;
-        register void *__cstack                 __asm__ ("r4")  = child_stack;
-        register int __flags                    __asm__ ("r3")  = flags;
-        register void * __arg                   __asm__ ("r9")  = arg;
-        register int * __ptidptr                __asm__ ("r5")  = parent_tidptr;
-        register void * __newtls                __asm__ ("r6")  = newtls;
-        register int * __ctidptr                __asm__ ("r7")  = child_tidptr;
+        long __args[7] = {
+          (long)fn, (long)child_stack, (long)flags, (long)arg,
+          (long)parent_tidptr, (long)newtls, (long)child_tidptr
+        };
+        register long *__args_ptr __asm__ ("r8") = __args;
         __asm__ __volatile__(
             /* check for fn == NULL
              * and child_stack == NULL
              */
-            "cmpwi cr0, %6, 0\n\t"
-            "cmpwi cr1, %7, 0\n\t"
+            "lwz 28, 0(%6)\n\t"     /* r28 = fn */
+            "lwz 4,  4(%6)\n\t"     /* r4  = child_stack */
+            "cmpwi cr0, 28, 0\n\t"
+            "cmpwi cr1, 4, 0\n\t"
             "cror cr0*4+eq, cr1*4+eq, cr0*4+eq\n\t"
             "beq- cr0, 1f\n\t"
             /* set up stack frame for child                                  */
-            "clrrwi %7, %7, 4\n\t"
+            "clrrwi 4, 4, 4\n\t"
             "li 0, 0\n\t"
-            "stwu 0, -16(%7)\n\t"
+            "stwu 0, -16(4)\n\t"
             /* fn, arg, child_stack are saved across the syscall: r28-30     */
-            "mr 28, %6\n\t"
-            "mr 29, %7\n\t"
-            "mr 27, %9\n\t"
+            "mr 29, 4\n\t"
+            "lwz 3,  8(%6)\n\t"     /* r3  = flags */
+            "lwz 27, 12(%6)\n\t"    /* r27 = arg */
+            "lwz 5,  16(%6)\n\t"    /* r5  = parent_tidptr */
+            "lwz 6,  20(%6)\n\t"    /* r6  = newtls */
+            "lwz 7,  24(%6)\n\t"    /* r7  = child_tidptr */
             /* syscall                                                       */
             "li 0, %4\n\t"
             /* flags already in r3
@@ -3323,11 +3326,9 @@ struct kernel_statx {
               : "=r" (__ret), "=r" (__err)
               : "0" (-1), "1" (EINVAL),
                 "i" (__NR_clone), "i" (__NR_exit),
-                "r" (__fn), "r" (__cstack), "r" (__flags),
-                "r" (__arg), "r" (__ptidptr), "r" (__newtls),
-                "r" (__ctidptr)
+                "r" (__args_ptr)
               : "cr0", "cr1", "memory", "ctr",
-                "r0", "r29", "r27", "r28");
+                "r0", "r3", "r4", "r5", "r6", "r7", "r27", "r28", "r29");
       }
       LSS_RETURN(int, __ret, __err);
     }
