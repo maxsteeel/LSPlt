@@ -8,7 +8,9 @@
 #include <array>
 #include <cinttypes>
 #include <list>
+#include <memory>
 #include <mutex>
+#include <string>
 #include <vector>
 #include <algorithm>
 #include <cstring>
@@ -513,9 +515,10 @@ namespace lsplt::inline v2 {
     constexpr static auto kPermLength = 5;
     constexpr static auto kMapEntry = 7;
     std::vector<MapInfo> info;
-    char path[32];
-    snprintf(path, sizeof(path), "/proc/%.*s/maps", static_cast<int>(pid.length()), pid.data());
-    long fd = syscall(__NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
+    std::string path = "/proc/";
+    path.append(pid);
+    path.append("/maps");
+    long fd = syscall(__NR_openat, AT_FDCWD, path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) return info;
     auto maps = std::unique_ptr<FILE, decltype(&fclose)>{fdopen((int)fd, "r"), &fclose};
     if (maps) {
