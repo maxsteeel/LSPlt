@@ -172,10 +172,11 @@ struct HookInfo : public lsplt::MapInfo {
 
 class HookInfos : public std::vector<HookInfo> {
 public:
-    static auto CreateTargetsFromMemoryMaps(std::vector<lsplt::MapInfo> maps) {
+    static auto CreateTargetsFromMemoryMaps(std::vector<lsplt::MapInfo> &maps) {
         static ino_t kSelfInode = 0;
         static dev_t kSelfDev = 0;
         HookInfos info;
+        info.reserve(maps.size());
         if (kSelfInode == 0) {
             auto self = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
             for (auto &map : maps) {
@@ -507,49 +508,132 @@ HookInfos g_global_hook_state;
 }  // namespace
 
 namespace lsplt::inline v2 {
+
+// --- HELPERS (De tu Rama 3) ---
+static inline bool IsSpace(char c) {
+    return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+}
+
+static inline void SkipSpace(const char*& p, const char* end) {
+    while (p < end && IsSpace(*p)) p++;
+}
+
+template<typename T>
+static inline bool ParseHex(const char*& p, const char* end, T* val) {
+    if (p >= end) return false;
+    *val = 0;
+    bool parsed_any = false;
+    while (p < end) {
+        char c = *p;
+        if (c >= '0' && c <= '9') { *val = (*val << 4) | (c - '0'); parsed_any = true; }
+        else if (c >= 'a' && c <= 'f') { *val = (*val << 4) | (c - 'a' + 10); parsed_any = true; }
+        else if (c >= 'A' && c <= 'F') { *val = (*val << 4) | (c - 'A' + 10); parsed_any = true; }
+        else break;
+        p++;
+    }
+    return parsed_any;
+}
+
+template<typename T>
+static inline bool ParseDec(const char*& p, const char* end, T* val) {
+    if (p >= end) return false;
+    *val = 0;
+    bool parsed_any = false;
+    while (p < end) {
+        char c = *p;
+        if (c >= '0' && c <= '9') { *val = (*val * 10) + (c - '0'); parsed_any = true; }
+        else break;
+        p++;
+    }
+    return parsed_any;
+}
+
 [[maybe_unused]] std::vector<MapInfo> MapInfo::Scan(std::string_view pid) {
-    constexpr static auto kPermLength = 5;
-    constexpr static auto kMapEntry = 7;
     std::vector<MapInfo> info;
+    info.reserve(256);
+
     std::string path = "/proc/";
     path.append(pid);
     path.append("/maps");
-    long fd = syscall(__NR_openat, AT_FDCWD, path.c_str(), O_RDONLY | O_CLOEXEC);
+    int fd = (int)syscall(__NR_openat, AT_FDCWD, path.c_str(), O_RDONLY | O_CLOEXEC);
     if (fd < 0) return info;
-    auto maps = std::unique_ptr<FILE, decltype(&fclose)>{fdopen((int)fd, "r"), &fclose};
-    if (maps) {
-        char *line = nullptr;
-        size_t len = 0;
-        ssize_t read;
-        while ((read = getline(&line, &len, maps.get())) > 0) {
-            line[read - 1] = '\0';
-            uintptr_t start = 0;
-            uintptr_t end = 0;
-            uintptr_t off = 0;
-            ino_t inode = 0;
-            unsigned int dev_major = 0;
-            unsigned int dev_minor = 0;
-            std::array<char, kPermLength> perm{'\0'};
-            int path_off;
-            if (sscanf(line, "%" PRIxPTR "-%" PRIxPTR " %4s %" PRIxPTR " %x:%x %lu %n%*s", &start,
-                       &end, perm.data(), &off, &dev_major, &dev_minor, &inode,
-                       &path_off) != kMapEntry) {
-                continue;
-            }
-            while (path_off < read && isspace(line[path_off])) path_off++;
-            auto &ref = info.emplace_back(MapInfo{start, end, 0, perm[3] == 'p', off,
-                                          static_cast<dev_t>(makedev(dev_major, dev_minor)), inode,
-                                          {0}});
-            strlcpy(ref.path, line + path_off, sizeof(ref.path));
 
-            if (perm[0] == 'r') ref.perms |= PROT_READ;
-            if (perm[1] == 'w') ref.perms |= PROT_WRITE;
-            if (perm[2] == 'x') ref.perms |= PROT_EXEC;
+    char buffer[16384];
+    size_t data_len = 0;
+    ssize_t bytes_read;
+
+    while ((bytes_read = (ssize_t)syscall(__NR_read, fd, buffer + data_len, sizeof(buffer) - data_len)) > 0) {
+        data_len += bytes_read;
+        const char *p = buffer;
+        const char *end = buffer + data_len;
+
+        while (true) {
+            const char *line_end = static_cast<const char *>(memchr(p, '\n', end - p));
+            if (!line_end) break;
+
+            const char* line_p = p;
+            uintptr_t map_start = 0, map_end = 0, map_off = 0;
+            uint64_t map_inode = 0;
+            uintptr_t major = 0, minor = 0;
+            if (ParseHex(line_p, line_end, &map_start) && line_p < line_end && *line_p == '-') {
+                line_p++;
+                if (ParseHex(line_p, line_end, &map_end)) {
+                    SkipSpace(line_p, line_end);
+
+                    bool read = false, write = false, exec = false, is_private = false;
+                    if (line_p < line_end) { read = (*line_p == 'r'); line_p++; }
+                    if (line_p < line_end) { write = (*line_p == 'w'); line_p++; }
+                    if (line_p < line_end) { exec = (*line_p == 'x'); line_p++; }
+                    if (line_p < line_end) { is_private = (*line_p == 'p'); line_p++; }
+                    if (line_p < line_end && *line_p != ' ') line_p++;
+                    SkipSpace(line_p, line_end);
+
+                    if (ParseHex(line_p, line_end, &map_off)) {
+                        SkipSpace(line_p, line_end);
+
+                        if (ParseHex(line_p, line_end, &major) && line_p < line_end && *line_p == ':') {
+                            line_p++;
+                            if (ParseHex(line_p, line_end, &minor)) {
+                                SkipSpace(line_p, line_end);
+
+                                if (ParseDec(line_p, line_end, &map_inode)) {
+                                    SkipSpace(line_p, line_end);
+
+                                    uint8_t perms = 0;
+                                    if (read) perms |= PROT_READ;
+                                    if (write) perms |= PROT_WRITE;
+                                    if (exec) perms |= PROT_EXEC;
+
+                                    auto &ref = info.emplace_back(MapInfo{
+                                            map_start, map_end, perms, is_private, map_off,
+                                            static_cast<dev_t>(makedev(major, minor)),
+                                            static_cast<ino_t>(map_inode), {0}
+                                    });
+
+                                    size_t path_len = line_end - line_p;
+                                    if (path_len >= sizeof(ref.path)) path_len = sizeof(ref.path) - 1;
+                                    if (path_len > 0) {
+                                        memcpy(ref.path, line_p, path_len);
+                                    }
+                                    ref.path[path_len] = '\0';
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            p = line_end + 1;
         }
-        free(line);
-    } else {
-        syscall(__NR_close, (int)fd);
+
+        if (p < end) {
+            size_t remaining = end - p;
+            memmove(buffer, p, remaining);
+            data_len = remaining;
+        } else {
+            data_len = 0;
+        }
     }
+    syscall(__NR_close, fd);
     return info;
 }
 
