@@ -5087,42 +5087,19 @@ struct kernel_statx {
   }
 #endif
 #if !defined(__NR_fork)
-// TODO: define this in an arch-independant way instead of inlining the clone
-//       syscall body.
-# if defined(__aarch64__) || defined(__riscv) || defined(__loongarch_lp64)
-  LSS_INLINE pid_t LSS_NAME(fork)(void) {
-    // No fork syscall on aarch64 - implement by means of the clone syscall.
-    // Note that this does not reset glibc's cached view of the PID/TID, so
-    // some glibc interfaces might go wrong in the forked subprocess.
-    int flags = SIGCHLD;
-    void *child_stack = NULL;
-    void *parent_tidptr = NULL;
-    void *newtls = NULL;
-    void *child_tidptr = NULL;
-    LSS_REG(0, flags);
-    LSS_REG(1, child_stack);
-    LSS_REG(2, parent_tidptr);
-    LSS_REG(3, newtls);
-    LSS_REG(4, child_tidptr);
-    LSS_BODY(pid_t, clone, "r"(__r0), "r"(__r1), "r"(__r2), "r"(__r3),
-             "r"(__r4));
-  }
-# elif defined(__x86_64__)
-  LSS_INLINE pid_t LSS_NAME(fork)(void) {
-    // Android disallows the fork syscall on x86_64 - implement by means of the
-    // clone syscall as above for aarch64.
-    int flags = SIGCHLD;
-    void *child_stack = NULL;
-    void *parent_tidptr = NULL;
-    void *newtls = NULL;
-    void *child_tidptr = NULL;
-    LSS_BODY(5, pid_t, clone, LSS_SYSCALL_ARG(flags),
-             LSS_SYSCALL_ARG(child_stack), LSS_SYSCALL_ARG(parent_tidptr),
-             LSS_SYSCALL_ARG(newtls), LSS_SYSCALL_ARG(child_tidptr));
-  }
-# else
-#  error missing fork polyfill for this architecture
-# endif
+#define __NR_raw_clone __NR_clone
+LSS_INLINE _syscall5(pid_t, raw_clone, int, flags, void *, child_stack,
+                     int *, parent_tidptr, int *, child_tidptr, void *, newtls)
+
+LSS_INLINE pid_t LSS_NAME(fork)(void) {
+  // Implement by means of the raw clone syscall since fork is not available.
+  // Note that this does not reset glibc's/bionic's cached view of the PID/TID.
+#if defined(__NR_raw_clone)
+  return LSS_NAME(raw_clone)(SIGCHLD, NULL, NULL, NULL, NULL);
+#else
+  return -1;
+#endif
+}
 #endif
 /* These restore the original values of these macros saved by the
  * corresponding #pragma push_macro near the top of this file. */
