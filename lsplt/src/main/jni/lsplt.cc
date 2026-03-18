@@ -372,10 +372,20 @@ public:
                 }
                 LOGD("backup with MREMAP_DONTUNMAP failed, tried without it");
             }
-            if (auto *new_addr = sys_mmap(reinterpret_cast<void *>(info.start), len,
-                                          PROT_READ | PROT_WRITE | info.perms,
-                                          MAP_PRIVATE | MAP_FIXED | MAP_ANON, -1, 0);
-                new_addr == MAP_FAILED) {
+            int fd = (int)syscall(__NR_openat, AT_FDCWD, info.path, O_RDONLY | O_CLOEXEC);
+            void *new_addr = MAP_FAILED;
+            if (fd >= 0) {
+                new_addr = sys_mmap(reinterpret_cast<void *>(info.start), len,
+                                    PROT_READ | PROT_WRITE | info.perms,
+                                    MAP_PRIVATE | MAP_FIXED, fd, info.offset);
+                syscall(__NR_close, fd);
+            }
+            if (new_addr == MAP_FAILED) {
+                new_addr = sys_mmap(reinterpret_cast<void *>(info.start), len,
+                                    PROT_READ | PROT_WRITE | info.perms,
+                                    MAP_PRIVATE | MAP_FIXED | MAP_ANON, -1, 0);
+            }
+            if (new_addr == MAP_FAILED) {
                 return false;
             }
             static const uintptr_t page_size = getpagesize();
@@ -384,19 +394,16 @@ public:
                  dest < end; src += page_size, dest += page_size) {
                 memcpy(reinterpret_cast<void *>(dest), reinterpret_cast<void *>(src), page_size);
             }
+            mprotect(reinterpret_cast<void *>(info.start), len, info.perms);
             info.backup = reinterpret_cast<uintptr_t>(backup_addr);
         }
-        if (info.self) {
-            // self hooking, no need backup since we are always dirty
-            if (!(info.perms & PROT_WRITE)) {
-                info.perms |= PROT_WRITE;
-                mprotect(reinterpret_cast<void *>(info.start), len, info.perms);
-            }
-        }
+
         auto *the_addr = reinterpret_cast<uintptr_t *>(addr);
         auto the_backup = *the_addr;
         if (*the_addr != callback) {
+            mprotect(PageStart(addr), getpagesize(), info.perms | PROT_WRITE);
             *the_addr = callback;
+            mprotect(PageStart(addr), getpagesize(), info.perms);
             if (backup) *backup = the_backup;
             __builtin___clear_cache(PageStart(addr), PageEnd(addr));
         } else {
@@ -532,7 +539,7 @@ public:
                 info.hooks.clear();
                 continue;
             }
-            if (!mprotect(PageStart(info.start), len, PROT_WRITE)) {
+            if (!mprotect(PageStart(info.start), len, info.perms | PROT_WRITE)) {
                 for (auto &[addr, backup] : info.hooks) {
                     *reinterpret_cast<uintptr_t *>(addr) = backup;
                 }
