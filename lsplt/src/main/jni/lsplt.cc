@@ -4,6 +4,7 @@
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include <array>
 #include <cinttypes>
@@ -562,7 +563,11 @@ static inline bool ParseDec(const char*& p, const char* end, T* val) {
     size_t data_len = 0;
     ssize_t bytes_read;
 
-    while ((bytes_read = (ssize_t)syscall(__NR_read, fd, buffer + data_len, sizeof(buffer) - data_len)) > 0) {
+    while (true) {
+        bytes_read = (ssize_t)syscall(__NR_read, fd, buffer + data_len, sizeof(buffer) - data_len);
+        if (bytes_read < 0 && errno == EINTR) continue;
+        if (bytes_read <= 0) break;
+
         data_len += bytes_read;
         const char *p = buffer;
         const char *end = buffer + data_len;
