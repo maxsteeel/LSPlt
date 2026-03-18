@@ -223,18 +223,60 @@ public:
     void Merge(HookInfos &old) {
         // merge with old map info
         if (old.size() == 0) return;
-        for (auto &old_info : old) {
-            if (old_info.backup) {
-                auto it = std::find_if(begin(), end(), [&](const HookInfo& hi){ return hi.start == old_info.backup; });
-                if (it != end()) erase(it);
-            }
-            auto iter = std::find_if(begin(), end(), [&](const HookInfo& hi){ return hi.start == old_info.start; });
-            if (iter != end()) {
-                *iter = std::move(old_info);
-            } else if (old_info.backup) {
-                push_back(std::move(old_info));
+
+        std::vector<uintptr_t> backups;
+        backups.reserve(old.size());
+        for (const auto &old_info : old) {
+            if (old_info.backup) backups.push_back(old_info.backup);
+        }
+        std::sort(backups.begin(), backups.end());
+
+        if (!backups.empty()) {
+            size_t b_idx = 0;
+            auto erase_it = std::remove_if(begin(), end(), [&](const HookInfo& hi) {
+                while (b_idx < backups.size() && backups[b_idx] < hi.start) {
+                    b_idx++;
+                }
+                return b_idx < backups.size() && backups[b_idx] == hi.start;
+            });
+            erase(erase_it, end());
+        }
+
+        HookInfos merged;
+        merged.reserve(size() + old.size());
+
+        auto it1 = begin();
+        auto it2 = old.begin();
+
+        while (it1 != end() && it2 != old.end()) {
+            if (it1->start < it2->start) {
+                merged.push_back(std::move(*it1));
+                ++it1;
+            } else if (it1->start > it2->start) {
+                if (it2->backup) {
+                    merged.push_back(std::move(*it2));
+                }
+                ++it2;
+            } else {
+                merged.push_back(std::move(*it2));
+                ++it1;
+                ++it2;
             }
         }
+
+        while (it1 != end()) {
+            merged.push_back(std::move(*it1));
+            ++it1;
+        }
+
+        while (it2 != old.end()) {
+            if (it2->backup) {
+                merged.push_back(std::move(*it2));
+            }
+            ++it2;
+        }
+
+        *this = std::move(merged);
     }
 
     /**
