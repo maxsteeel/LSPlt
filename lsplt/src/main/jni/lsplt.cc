@@ -23,12 +23,12 @@
 namespace {
 
 inline auto PageStart(uintptr_t addr) {
-    const uintptr_t page_size = getpagesize();
+    static const uintptr_t page_size = getpagesize();
     return reinterpret_cast<char *>(addr / page_size * page_size);
 }
 
 inline auto PageEnd(uintptr_t addr) {
-    const uintptr_t page_size = getpagesize();
+    static const uintptr_t page_size = getpagesize();
     return reinterpret_cast<char *>(reinterpret_cast<uintptr_t>(PageStart(addr)) + page_size);
 }
 
@@ -336,7 +336,7 @@ public:
                 new_addr == MAP_FAILED) {
                 return false;
             }
-            const uintptr_t page_size = getpagesize();
+            static const uintptr_t page_size = getpagesize();
             for (uintptr_t src = reinterpret_cast<uintptr_t>(backup_addr), dest = info.start,
                            end = info.start + len;
                  dest < end; src += page_size, dest += page_size) {
