@@ -180,27 +180,26 @@ public:
         static dev_t kSelfDev = 0;
         HookInfos info;
         info.reserve(maps.size());
-        if (kSelfInode == 0) {
-            auto self = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
-            for (auto &map : maps) {
-                if (self >= map.start && self < map.end) {
-                    kSelfInode = map.inode;
-                    kSelfDev = map.dev;
-                    LOGV("self inode = %lu", kSelfInode);
-                    break;
+        const uintptr_t self_addr =
+            (kSelfInode == 0) ? reinterpret_cast<uintptr_t>(__builtin_return_address(0)) : 0;
+        for (auto &map : maps) {
+            if (kSelfInode == 0 && self_addr >= map.start && self_addr < map.end) {
+                kSelfInode = map.inode;
+                kSelfDev = map.dev;
+                LOGV("self inode = %lu", kSelfInode);
+                for (auto &i : info) {
+                    if (i.inode == kSelfInode && i.dev == kSelfDev) i.self = true;
                 }
             }
-        }
-        for (auto &map : maps) {
             // we basically only care about r-?p entry
             // and for offset == 0 it's an ELF header
             // and for offset != 0 it's what we hook
             // both of them should not be xom
-            if (!map.is_private || !(map.perms & PROT_READ) || map.path[0] == '\0' ||
-                map.path[0] == '[') {
+            if (map.inode == 0 || !map.is_private || !(map.perms & PROT_READ) ||
+                map.path[0] == '\0' || map.path[0] == '[') {
                 continue;
             }
-            const bool self = map.inode == kSelfInode && map.dev == kSelfDev;
+            const bool self = kSelfInode != 0 && map.inode == kSelfInode && map.dev == kSelfDev;
             info.emplace_back(std::move(map), self);
         }
         return info;
