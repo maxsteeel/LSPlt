@@ -263,13 +263,13 @@ uint32_t Elf::LinearLookup(std::string_view name) const {
     return 0;
 }
 
-std::vector<uintptr_t> Elf::FindPltAddr(std::string_view name) const {
-    std::vector<uintptr_t> res;
+void Elf::FindPltAddr(std::string_view name, std::vector<uintptr_t> &res) const {
+    res.clear();
 
     uint32_t idx = GnuLookup(name);
     if (!idx) idx = ElfLookup(name);
     if (!idx) idx = LinearLookup(name);
-    if (!idx) return res;
+    if (!idx) return;
 
     auto looper = [&]<typename T>(auto begin, auto size, bool is_plt) -> void {
         const auto *rel_end = reinterpret_cast<const T *>(begin + size);
@@ -300,6 +300,4 @@ std::vector<uintptr_t> Elf::FindPltAddr(std::string_view name) const {
             looper.template operator()<ElfW(Rel)>(rel, rel_size, is_plt);
         }
     }
-
-    return res;
 }

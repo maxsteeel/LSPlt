@@ -497,6 +497,7 @@ public:
 
     bool ProcessRequest(std::vector<HookRequest> &register_info) {
         bool res = true;
+        std::vector<uintptr_t> possible_addr;
         auto iter = std::remove_if(register_info.begin(), register_info.end(), [&](const HookRequest &reg) {
             bool processed = false;
             for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
@@ -506,7 +507,7 @@ public:
                 if (!info.elf) info.elf = std::make_unique<Elf>(info.start);
                 if (info.elf && info.elf->Valid()) {
                     LOGV("finding symbol %s", reg.symbol);
-                    auto possible_addr = info.elf->FindPltAddr(reg.symbol);
+                    info.elf->FindPltAddr(reg.symbol, possible_addr);
                     if (possible_addr.size() == 0) {
                         LOGW("symbol %s not found in PLT table", reg.symbol);
                         res = false;

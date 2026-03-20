@@ -44,7 +44,7 @@ class Elf {
     uint32_t ElfLookup(std::string_view name) const;
     uint32_t LinearLookup(std::string_view name) const;
 public:
-    std::vector<uintptr_t> FindPltAddr(std::string_view name) const;
+    void FindPltAddr(std::string_view name, std::vector<uintptr_t> &res) const;
     Elf(uintptr_t base_addr);
     bool Valid() const { return valid_; };
 };
