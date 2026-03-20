@@ -215,10 +215,13 @@ uint32_t Elf::GnuLookup(std::string_view name) const {
     if ((mask & bloom_word) == mask) {
         auto idx = bucket_[hash % bucket_count_];
         if (idx >= sym_offset_) {
+            if (name.empty()) return 0;
+            const char first_char = name[0];
             const char *strings = dyn_str_;
             do {
                 auto *sym = dyn_sym_ + idx;
-                if (((chain_[idx] ^ hash) >> 1) == 0 && name == strings + sym->st_name) {
+                const char *sym_name = strings + sym->st_name;
+                if (((chain_[idx] ^ hash) >> 1) == 0 && sym_name[0] == first_char && name == sym_name) {
                     return idx;
                 }
             } while ((chain_[idx++] & 1) == 0);
@@ -231,21 +234,24 @@ uint32_t Elf::ElfLookup(std::string_view name) const {
     static constexpr uint32_t kHashMask = 0xf0000000;
     static constexpr uint32_t kHashShift = 24;
     uint32_t hash = 0;
-    uint32_t tmp;
 
     if (!bucket_ || bloom_) return 0;
 
     for (unsigned char chr : name) {
         hash = (hash << 4) + chr;
-        tmp = hash & kHashMask;
-        hash ^= tmp;
-        hash ^= tmp >> kHashShift;
+        uint32_t tmp = hash & kHashMask;
+        hash ^= tmp | (tmp >> kHashShift);
     }
+
+    if (name.empty()) return 0;
+
+    const char first_char = name[0];
     const char *strings = dyn_str_;
 
     for (auto idx = bucket_[hash % bucket_count_]; idx != 0; idx = chain_[idx]) {
         auto *sym = dyn_sym_ + idx;
-        if (name == strings + sym->st_name) {
+        const char *sym_name = strings + sym->st_name;
+        if (sym_name[0] == first_char && name == sym_name) {
             return idx;
         }
     }
@@ -253,10 +259,12 @@ uint32_t Elf::ElfLookup(std::string_view name) const {
 }
 
 uint32_t Elf::LinearLookup(std::string_view name) const {
-    if (!dyn_sym_ || !sym_offset_) return 0;
+    if (!dyn_sym_ || !sym_offset_ || name.empty()) return 0;
+    const char first_char = name[0];
     for (uint32_t idx = 0; idx < sym_offset_; idx++) {
         auto *sym = dyn_sym_ + idx;
-        if (name == dyn_str_ + sym->st_name) {
+        const char *sym_name = dyn_str_ + sym->st_name;
+        if (sym_name[0] == first_char && name == sym_name) {
             return idx;
         }
     }
