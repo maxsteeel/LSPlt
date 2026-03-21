@@ -678,10 +678,16 @@ static int DlIterateCallback(struct dl_phdr_info *info, size_t size, void *data)
         return info;
     }
 
-    std::string path = "/proc/";
-    path.append(pid);
-    path.append("/maps");
-    int fd = (int)syscall(__NR_openat, AT_FDCWD, path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (pid.length() > 64 - 12) return info;
+    char path[64];
+    char* ptr = path;
+    std::memcpy(ptr, "/proc/", 6);
+    ptr += 6;
+    std::memcpy(ptr, pid.data(), pid.length());
+    ptr += pid.length();
+    std::memcpy(ptr, "/maps", 6);
+
+    int fd = (int)syscall(__NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return info;
 
     char buffer[16384];
