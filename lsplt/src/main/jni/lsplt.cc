@@ -414,11 +414,11 @@ public:
         } else {
             LOGV("the address already has the expected callback, no need to patch");
         }
-        auto hook_iter = std::find_if(info.hooks.begin(), info.hooks.end(), [addr](const auto& p){ return p.first == addr; });
-        if (hook_iter != info.hooks.end()) {
-            if (hook_iter->second == callback) info.hooks.erase(hook_iter);
+        auto hook_iter = std::lower_bound(info.hooks.begin(), info.hooks.end(), addr, [](const auto& p, uintptr_t a){ return p.first < a; });
+        if (hook_iter != info.hooks.end() && hook_iter->first == addr) {
+            if (hook_iter->second == callback) info.hooks.erase(hook_iter); // Remove if matching
         } else {
-            info.hooks.push_back({addr, the_backup});
+            info.hooks.insert(hook_iter, {addr, the_backup}); // Insert in sorted order
         }
         if (info.hooks.empty() && !info.self) {
             LOGV("restore %p from %p", reinterpret_cast<void *>(info.start),
@@ -471,7 +471,7 @@ public:
                     continue;
                 }
                 auto hook_it = std::find_if(info.hooks.begin(), info.hooks.end(),
-                                            [&](const auto &p) { return p.second == reinterpret_cast<uintptr_t>(reg.callback); });
+                                             [&](const auto &p) { return p.second == reinterpret_cast<uintptr_t>(reg.callback); });
                 if (hook_it != info.hooks.end()) {
                     LOGV("found matching hook for symbol [%s] at address %p.",
                          reg.symbol, reinterpret_cast<void *>(hook_it->first));
