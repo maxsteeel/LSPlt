@@ -403,11 +403,15 @@ public:
         auto *the_addr = reinterpret_cast<uintptr_t *>(addr);
         auto the_backup = *the_addr;
         if (*the_addr != callback) {
-            mprotect(PageStart(addr), getpagesize(), info.perms | PROT_WRITE);
-            *the_addr = callback;
-            mprotect(PageStart(addr), getpagesize(), info.perms);
-            if (backup) *backup = the_backup;
-            __builtin___clear_cache(PageStart(addr), PageEnd(addr));
+            if (mprotect(PageStart(addr), getpagesize(), info.perms | PROT_WRITE) == 0) {
+                *the_addr = callback;
+                mprotect(PageStart(addr), getpagesize(), info.perms);
+                if (backup) *backup = the_backup;
+                __builtin___clear_cache(PageStart(addr), PageEnd(addr));
+            } else {
+                PLOGE("mprotect failed to add PROT_WRITE for patching");
+                return false;
+            }
         } else {
             LOGV("the address already has the expected callback, no need to patch");
         }
