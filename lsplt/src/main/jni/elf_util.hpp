@@ -4,6 +4,21 @@
 #include <string_view>
 #include <vector>
 
+struct SymName {
+    std::string_view name;
+    uint32_t gnu_hash = 5381;
+    uint32_t elf_hash = 0;
+
+    explicit SymName(std::string_view n) : name(n) {
+        for (unsigned char chr : n) {
+            gnu_hash += (gnu_hash << 5) + chr;
+            elf_hash = (elf_hash << 4) + chr;
+            uint32_t tmp = elf_hash & 0xf0000000;
+            elf_hash ^= tmp | (tmp >> 24);
+        }
+    }
+};
+
 class Elf {
     ElfW(Addr) base_addr_ = 0;
     ElfW(Addr) bias_addr_ = 0;
@@ -40,9 +55,9 @@ class Elf {
     bool is_use_rela_ = false;
     bool valid_ = false;
 
-    uint32_t GnuLookup(std::string_view name) const;
-    uint32_t ElfLookup(std::string_view name) const;
-    uint32_t LinearLookup(std::string_view name) const;
+    uint32_t GnuLookup(const SymName& name) const;
+    uint32_t ElfLookup(const SymName& name) const;
+    uint32_t LinearLookup(const SymName& name) const;
 public:
     void FindPltAddr(std::string_view name, std::vector<uintptr_t> &res) const;
     Elf(uintptr_t base_addr);
