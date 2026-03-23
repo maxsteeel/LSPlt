@@ -10,7 +10,6 @@
 
 #include <array>
 #include <cinttypes>
-#include <list>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -173,8 +172,27 @@ struct HookInfo : public lsplt::MapInfo {
     }
 };
 
-class HookInfos : public std::vector<HookInfo> {
+class HookInfos {
 public:
+    std::vector<HookInfo> data;
+
+    HookInfos() = default;
+    HookInfos(HookInfos&&) noexcept = default;
+    HookInfos& operator=(HookInfos&&) noexcept = default;
+    void reserve(size_t n) { data.reserve(n); }
+    auto begin() { return data.begin(); }
+    auto end() { return data.end(); }
+    auto rbegin() { return data.rbegin(); }
+    auto rend() { return data.rend(); }
+    bool empty() const { return data.empty(); }
+    size_t size() const { return data.size(); }
+    void erase(auto it1, auto it2) { data.erase(it1, it2); }
+    void push_back(HookInfo&& hi) { data.push_back(std::move(hi)); }
+    template <typename... Args>
+    void emplace_back(Args&&... args) { 
+        data.emplace_back(std::forward<Args>(args)...); 
+    }
+
     static auto CreateTargetsFromMemoryMaps(std::vector<lsplt::MapInfo> &maps) {
         static ino_t kSelfInode = 0;
         static dev_t kSelfDev = 0;
@@ -187,7 +205,7 @@ public:
                 kSelfInode = map.inode;
                 kSelfDev = map.dev;
                 LOGV("self inode = %lu", kSelfInode);
-                for (auto &i : info) {
+                for (auto &i : info.data) {
                     if (i.inode == kSelfInode && i.dev == kSelfDev) i.self = true;
                 }
             }
@@ -208,7 +226,7 @@ public:
     // filter out ignored
     void Filter(const std::vector<HookRequest> &register_info) {
         // Optimized using erase-remove idiom to achieve O(N) complexity instead of O(N^2)
-        auto it = std::remove_if(begin(), end(), [&](const auto &info) {
+        auto it = std::remove_if(data.begin(), data.end(), [&](const auto &info) {
             bool matched = std::any_of(register_info.begin(), register_info.end(),
                                        [&](const auto &reg) { return info.Match(reg); });
             if (matched) {
@@ -218,38 +236,42 @@ public:
             }
             return true;
         });
-        erase(it, end());
+        data.erase(it, data.end());
     }
 
     void Merge(HookInfos &old) {
         // merge with old map info
-        if (old.size() == 0) return;
+        if (old.data.empty()) return;
 
         std::vector<uintptr_t> backups;
         backups.reserve(old.size());
-        for (const auto &old_info : old) {
+        for (const auto &old_info : old.data) {
             if (old_info.backup) backups.push_back(old_info.backup);
         }
-        std::sort(backups.begin(), backups.end());
+        qsort(backups.data(), backups.size(), sizeof(backups[0]), [](const void* a, const void* b) {
+            auto v1 = *(uintptr_t*)a;
+            auto v2 = *(uintptr_t*)b;
+            return (v1 > v2) - (v1 < v2); // Standard safe comparison for pointers/ints
+        });
 
         if (!backups.empty()) {
             size_t b_idx = 0;
-            auto erase_it = std::remove_if(begin(), end(), [&](const HookInfo& hi) {
+            auto erase_it = std::remove_if(data.begin(), data.end(), [&](const HookInfo& hi) {
                 while (b_idx < backups.size() && backups[b_idx] < hi.start) {
                     b_idx++;
                 }
                 return b_idx < backups.size() && backups[b_idx] == hi.start;
             });
-            erase(erase_it, end());
+            data.erase(erase_it, data.end());
         }
 
         HookInfos merged;
         merged.reserve(size() + old.size());
 
-        auto it1 = begin();
-        auto it2 = old.begin();
+        auto it1 = data.begin();
+        auto it2 = old.data.begin();
 
-        while (it1 != end() && it2 != old.end()) {
+        while (it1 != data.end() && it2 != old.data.end()) {
             if (it1->start < it2->start) {
                 merged.push_back(std::move(*it1));
                 ++it1;
@@ -265,12 +287,12 @@ public:
             }
         }
 
-        while (it1 != end()) {
+        while (it1 != data.end()) {
             merged.push_back(std::move(*it1));
             ++it1;
         }
 
-        while (it2 != old.end()) {
+        while (it2 != old.data.end()) {
             if (it2->backup) {
                 merged.push_back(std::move(*it2));
             }
@@ -351,10 +373,10 @@ public:
 
     bool PatchPLTEntry(uintptr_t addr, uintptr_t callback, uintptr_t *backup) {
         LOGV("hooking %p", reinterpret_cast<void *>(addr));
-        auto iter = std::find_if(begin(), end(), [addr](const HookInfo& hi) {
+        auto iter = std::find_if(data.begin(), data.end(), [addr](const HookInfo& hi) {
             return addr >= hi.start && addr < hi.end;
         });
-        if (iter == end()) return false;
+        if (iter == data.end()) return false;
         auto &info = *iter;
         const auto len = info.end - info.start;
         if (!info.backup && !info.self) {
@@ -465,7 +487,7 @@ public:
         bool res = true;
         auto it = std::remove_if(register_info.begin(), register_info.end(), [&](const auto &reg) {
             bool restored = false;
-            for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
+            for (auto info_iter = data.rbegin(); info_iter != data.rend(); ++info_iter) {
                 auto &info = *info_iter;
                 if (info.hooks.empty() || info.dev != reg.dev || info.inode != reg.inode) {
                     continue;
@@ -499,7 +521,7 @@ public:
         std::vector<uintptr_t> possible_addr;
         auto iter = std::remove_if(register_info.begin(), register_info.end(), [&](const HookRequest &reg) {
             bool processed = false;
-            for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
+            for (auto info_iter = data.rbegin(); info_iter != data.rend(); ++info_iter) {
                 auto &info = *info_iter;
                 if (info.offset != reg.offset_range.first || !info.Match(reg)) continue;
 
@@ -530,7 +552,7 @@ public:
 
     bool CleanupAllHooks() {
         bool res = true;
-        for (auto &info : *this) {
+        for (auto &info : data) {
             if (!info.backup) continue;
             for (auto &[addr, backup] : info.hooks) {
                 // store new address to backup since we don't need backup
@@ -610,7 +632,7 @@ static inline bool ParseDec(const char*& p, const char* end, T* val) {
 #define PAGE_START(x) ((x) & ~(PAGE_SIZE - 1))
 #define PAGE_END(x) PAGE_START((x) + (PAGE_SIZE - 1))
 
-static int DlIterateCallback(struct dl_phdr_info *info, size_t size, void *data) {
+static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t size, void *data) {
     auto *info_vec = static_cast<std::vector<MapInfo> *>(data);
 
     const char *name = info->dlpi_name;
@@ -680,12 +702,11 @@ static int DlIterateCallback(struct dl_phdr_info *info, size_t size, void *data)
 
     if (pid.length() > 64 - 12) return info;
     char path[64];
-    char* ptr = path;
-    std::memcpy(ptr, "/proc/", 6);
-    ptr += 6;
-    std::memcpy(ptr, pid.data(), pid.length());
-    ptr += pid.length();
-    std::memcpy(ptr, "/maps", 6);
+    if (pid == "self") {
+        strlcpy(path, "/proc/self/maps", sizeof(path));
+    } else {
+        snprintf(path, sizeof(path), "/proc/%.*s/maps", static_cast<int>(pid.length()), pid.data());
+    }
 
     int fd = (int)syscall(__NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return info;

@@ -284,15 +284,16 @@ void Elf::FindPltAddr(std::string_view name, std::vector<uintptr_t> &res) const 
         }
     };
 
-    for (const auto &[rel, rel_size, is_plt] :
-         {std::make_tuple(rel_plt_, rel_plt_size_, true),
-          std::make_tuple(rel_dyn_, rel_dyn_size_, false),
-          std::make_tuple(rel_android_, rel_android_size_, false)}) {
-        if (!rel) continue;
+    auto do_reloc = [&](auto rel, auto size, bool is_plt) {
+        if (!rel) return;
         if (is_use_rela_) {
-            looper.template operator()<ElfW(Rela)>(rel, rel_size, is_plt);
+            looper.template operator()<ElfW(Rela)>(rel, size, is_plt);
         } else {
-            looper.template operator()<ElfW(Rel)>(rel, rel_size, is_plt);
+            looper.template operator()<ElfW(Rel)>(rel, size, is_plt);
         }
-    }
+    };
+
+    do_reloc(rel_plt_, rel_plt_size_, true);
+    do_reloc(rel_dyn_, rel_dyn_size_, false);
+    do_reloc(rel_android_, rel_android_size_, false);
 }
