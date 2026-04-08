@@ -277,11 +277,7 @@ public:
         for (const auto &old_info : old.data) {
             if (old_info.backup) backups.push_back(old_info.backup);
         }
-        qsort(backups.data(), backups.size(), sizeof(backups[0]), [](const void* a, const void* b) {
-            auto v1 = *(uintptr_t*)a;
-            auto v2 = *(uintptr_t*)b;
-            return (v1 > v2) - (v1 < v2); // Standard safe comparison for pointers/ints
-        });
+        std::sort(backups.begin(), backups.end());
 
         if (!backups.empty()) {
             size_t b_idx = 0;
@@ -514,16 +510,10 @@ public:
         bool res = true;
 
         // Sort by callback address for O(log N) binary search
-        qsort(register_info.data(), register_info.size(), sizeof(HookRequest),
-            +[](const void* a, const void* b) -> int {
-                const auto* req1 = static_cast<const HookRequest*>(a);
-                const auto* req2 = static_cast<const HookRequest*>(b);
-                auto cb1 = reinterpret_cast<uintptr_t>(req1->callback);
-                auto cb2 = reinterpret_cast<uintptr_t>(req2->callback);
-                if (cb1 < cb2) return -1;
-                if (cb1 > cb2) return 1;
-                return 0;
-            });
+        std::sort(register_info.begin(), register_info.end(), 
+            [](const HookRequest& a, const HookRequest& b) {
+                return reinterpret_cast<uintptr_t>(a.callback) < reinterpret_cast<uintptr_t>(b.callback);
+        });
 
         for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
             auto &info = *info_iter;
