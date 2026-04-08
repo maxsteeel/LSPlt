@@ -369,10 +369,12 @@ public:
 
     bool PatchPLTEntry(uintptr_t addr, uintptr_t callback, uintptr_t *backup) {
         LOGV("hooking %p", reinterpret_cast<void *>(addr));
-        auto iter = std::find_if(data.begin(), data.end(), [addr](const HookInfo& hi) {
-            return addr >= hi.start && addr < hi.end;
+        auto iter = std::upper_bound(data.begin(), data.end(), addr, [](uintptr_t a, const HookInfo& hi) {
+            return a < hi.start;
         });
-        if (iter == data.end()) return false;
+        if (iter == data.begin()) return false;
+        --iter;
+        if (addr >= iter->end) return false;
         auto &info = *iter;
         const auto len = info.end - info.start;
         if (!info.backup && !info.self) {
