@@ -28,11 +28,6 @@ inline auto PageStart(uintptr_t addr) {
     return reinterpret_cast<char *>(addr / page_size * page_size);
 }
 
-inline auto PageEnd(uintptr_t addr) {
-    static const uintptr_t page_size = getpagesize();
-    return reinterpret_cast<char *>(reinterpret_cast<uintptr_t>(PageStart(addr)) + page_size);
-}
-
 /*
  * =======================================================================================
  *                            High-Level Data Flow Diagram
@@ -423,7 +418,7 @@ public:
                 *the_addr = callback;
                 mprotect(PageStart(addr), getpagesize(), info.perms);
                 if (backup) *backup = the_backup;
-                __builtin___clear_cache(PageStart(addr), PageEnd(addr));
+                __builtin___clear_cache(reinterpret_cast<char *>(the_addr), reinterpret_cast<char *>(the_addr + 1));
             } else {
                 PLOGE("mprotect failed to add PROT_WRITE for patching");
                 return false;
