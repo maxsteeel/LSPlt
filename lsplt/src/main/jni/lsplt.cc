@@ -479,35 +479,70 @@ public:
      */
     bool RestoreFunction(std::vector<HookRequest> &register_info) {
         LOGV("restoring %zu functions", register_info.size());
+        if (register_info.empty()) return true;
         bool res = true;
-        auto it = std::remove_if(register_info.begin(), register_info.end(), [&](const auto &reg) {
-            bool restored = false;
-            for (auto info_iter = data.rbegin(); info_iter != data.rend(); ++info_iter) {
-                auto &info = *info_iter;
-                if (info.hooks.empty() || info.dev != reg.dev || info.inode != reg.inode) {
-                    continue;
-                }
-                auto hook_it = std::find_if(info.hooks.begin(), info.hooks.end(),
-                                             [&](const auto &p) { return p.second == reinterpret_cast<uintptr_t>(reg.callback); });
-                if (hook_it != info.hooks.end()) {
-                    LOGV("found matching hook for symbol [%s] at address %p.",
-                         reg.symbol, reinterpret_cast<void *>(hook_it->first));
-                    restored = PatchPLTEntry(hook_it->first, hook_it->second, nullptr);
-                    res = restored && res;
-                    break;
-                }
-            }
-            if (!restored) {
-                LOGW("no matched hook found to restore function [%s]", reg.symbol);
-            }
-            return restored;
-        });
-        register_info.erase(it, register_info.end());
 
-        if (!res) {
-            LOGV("fallback to address searching for %zu functions not restored",
-                 register_info.size());
+        qsort(register_info.data(), register_info.size(), sizeof(HookRequest),
+            +[](const void* a, const void* b) -> int {
+                const auto* req1 = static_cast<const HookRequest*>(a);
+                const auto* req2 = static_cast<const HookRequest*>(b);
+                auto cb1 = reinterpret_cast<uintptr_t>(req1->callback);
+                auto cb2 = reinterpret_cast<uintptr_t>(req2->callback);
+                if (cb1 < cb2) return -1;
+                if (cb1 > cb2) return 1;
+                return 0;
+            });
+
+        for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
+            auto &info = *info_iter;
+            if (info.hooks.empty()) continue;
+
+            for (auto hook_it = info.hooks.begin(); hook_it != info.hooks.end(); ) {
+                uintptr_t hook_cb = hook_it->second;
+
+                size_t low = 0, high = register_info.size();
+                while (low < high) {
+                    size_t mid = low + (high - low) / 2;
+                    if (reinterpret_cast<uintptr_t>(register_info[mid].callback) < hook_cb) {
+                        low = mid + 1;
+                    } else {
+                        high = mid;
+                    }
+                }
+
+                bool matched_and_restored = false;
+                size_t req_idx = low;
+
+                while (req_idx < register_info.size() && 
+                       reinterpret_cast<uintptr_t>(register_info[req_idx].callback) == hook_cb) {
+                    auto &req = register_info[req_idx];
+                    if (info.dev == req.dev && info.inode == req.inode) {
+                        LOGV("found matching hook for symbol [%s] at address %p.",
+                             req.symbol, reinterpret_cast<void *>(hook_cb));
+                        bool restored = PatchPLTEntry(hook_it->first, hook_it->second, nullptr);
+                        res = restored && res;
+                        req.callback = nullptr;
+                        matched_and_restored = true;
+                    }
+                    ++req_idx;
+                }
+
+                if (matched_and_restored) {
+                    hook_it = info.hooks.erase(hook_it);
+                } else {
+                    ++hook_it;
+                }
+            }
         }
+
+        size_t write_idx = 0;
+        for (size_t read_idx = 0; read_idx < register_info.size(); ++read_idx) {
+            if (register_info[read_idx].callback != nullptr) {
+                register_info[write_idx++] = register_info[read_idx];
+            }
+        }
+        register_info.resize(write_idx);
+
         return res;
     }
 
