@@ -579,12 +579,30 @@ public:
     bool ProcessRequest(std::vector<HookRequest> &register_info) {
         bool res = true;
         std::vector<uintptr_t> possible_addr;
+
+        std::sort(register_info.begin(), register_info.end(), [](const HookRequest &a, const HookRequest &b) {
+            if (a.dev != b.dev) return a.dev < b.dev;
+            if (a.inode != b.inode) return a.inode < b.inode;
+            return a.offset_range.first < b.offset_range.first;
+        });
+
+        HookInfo* last_matched_info = nullptr;
+
         auto iter = std::remove_if(register_info.begin(), register_info.end(), [&](const HookRequest &reg) {
             bool processed = false;
-            for (auto info_iter = data.rbegin(); info_iter != data.rend(); ++info_iter) {
-                auto &info = *info_iter;
-                if (info.offset != reg.offset_range.first || !info.Match(reg)) continue;
 
+            if (!last_matched_info || last_matched_info->offset != reg.offset_range.first || !last_matched_info->Match(reg)) {
+                last_matched_info = nullptr;
+                for (auto info_iter = data.rbegin(); info_iter != data.rend(); ++info_iter) {
+                    auto &info = *info_iter;
+                    if (info.offset != reg.offset_range.first || !info.Match(reg)) continue;
+                    last_matched_info = &info;
+                    break;
+                }
+            }
+
+            if (last_matched_info) {
+                auto &info = *last_matched_info;
                 if (!info.elf) info.elf = std::make_unique<Elf>(info.start);
                 if (info.elf && info.elf->Valid()) {
                     LOGV("finding symbol %s", reg.symbol);
@@ -602,7 +620,6 @@ public:
                     }
                 }
                 processed = true;
-                break;
             }
             return processed;
         });
