@@ -52,6 +52,12 @@ inline constexpr auto SetByOffset(T &ptr, ElfW(Addr) base, ElfW(Addr) bias, ElfW
     return false;
 }
 
+inline bool MatchSymName(const SymName& name, const char* sym_name) {
+    return sym_name[0] == name.name[0] &&
+           strncmp(name.name.data(), sym_name, name.name.size()) == 0 &&
+           sym_name[name.name.size()] == '\0';
+}
+
 }  // namespace
 
 Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
@@ -210,12 +216,11 @@ uint32_t Elf::GnuLookup(const SymName& name) const {
         auto idx = bucket_[hash % bucket_count_];
         if (idx >= sym_offset_) {
             if (name.name.empty()) return 0;
-            const char first_char = name.name[0];
             const char *strings = dyn_str_;
             do {
                 auto *sym = dyn_sym_ + idx;
                 const char *sym_name = strings + sym->st_name;
-                if (((chain_[idx] ^ hash) >> 1) == 0 && sym_name[0] == first_char && strncmp(name.name.data(), sym_name, name.name.size()) == 0 && sym_name[name.name.size()] == '\0') {
+                if (((chain_[idx] ^ hash) >> 1) == 0 && MatchSymName(name, sym_name)) {
                     return idx;
                 }
             } while ((chain_[idx++] & 1) == 0);
@@ -231,13 +236,12 @@ uint32_t Elf::ElfLookup(const SymName& name) const {
 
     if (name.name.empty()) return 0;
 
-    const char first_char = name.name[0];
     const char *strings = dyn_str_;
 
     for (auto idx = bucket_[hash % bucket_count_]; idx != 0; idx = chain_[idx]) {
         auto *sym = dyn_sym_ + idx;
         const char *sym_name = strings + sym->st_name;
-        if (sym_name[0] == first_char && strncmp(name.name.data(), sym_name, name.name.size()) == 0 && sym_name[name.name.size()] == '\0') {
+        if (MatchSymName(name, sym_name)) {
             return idx;
         }
     }
@@ -246,11 +250,10 @@ uint32_t Elf::ElfLookup(const SymName& name) const {
 
 uint32_t Elf::LinearLookup(const SymName& name) const {
     if (!dyn_sym_ || !sym_offset_ || name.name.empty()) return 0;
-    const char first_char = name.name[0];
     for (uint32_t idx = 0; idx < sym_offset_; idx++) {
         auto *sym = dyn_sym_ + idx;
         const char *sym_name = dyn_str_ + sym->st_name;
-        if (sym_name[0] == first_char && strncmp(name.name.data(), sym_name, name.name.size()) == 0 && sym_name[name.name.size()] == '\0') {
+        if (MatchSymName(name, sym_name)) {
             return idx;
         }
     }
