@@ -743,6 +743,62 @@ static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t 
     return 0;
 }
 
+static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_info) {
+    uintptr_t map_start = 0, map_end = 0, map_off = 0;
+    uint64_t map_inode = 0;
+    uintptr_t major = 0, minor = 0;
+
+    if (!ParseHex(line_p, line_end, &map_start)) return false;
+    if (line_p >= line_end || *line_p != '-') return false;
+    line_p++;
+
+    if (!ParseHex(line_p, line_end, &map_end)) return false;
+    SkipSpace(line_p, line_end);
+
+    bool read = false, write = false, exec = false, is_private = false;
+    if (line_p < line_end) { read = (*line_p == 'r'); line_p++; } else return false;
+    if (line_p < line_end) { write = (*line_p == 'w'); line_p++; } else return false;
+    if (line_p < line_end) { exec = (*line_p == 'x'); line_p++; } else return false;
+    if (line_p < line_end) { is_private = (*line_p == 'p'); line_p++; } else return false;
+    if (line_p < line_end && *line_p != ' ') line_p++;
+    SkipSpace(line_p, line_end);
+
+    if (!ParseHex(line_p, line_end, &map_off)) return false;
+    SkipSpace(line_p, line_end);
+
+    if (!ParseHex(line_p, line_end, &major)) return false;
+    if (line_p >= line_end || *line_p != ':') return false;
+    line_p++;
+
+    if (!ParseHex(line_p, line_end, &minor)) return false;
+    SkipSpace(line_p, line_end);
+
+    if (!ParseDec(line_p, line_end, &map_inode)) return false;
+    SkipSpace(line_p, line_end);
+
+    uint8_t perms = 0;
+    if (read) perms |= PROT_READ;
+    if (write) perms |= PROT_WRITE;
+    if (exec) perms |= PROT_EXEC;
+
+    map_info.start = map_start;
+    map_info.end = map_end;
+    map_info.perms = perms;
+    map_info.is_private = is_private;
+    map_info.offset = map_off;
+    map_info.dev = static_cast<dev_t>(makedev(major, minor));
+    map_info.inode = static_cast<ino_t>(map_inode);
+
+    size_t path_len = line_end - line_p;
+    if (path_len >= sizeof(map_info.path)) path_len = sizeof(map_info.path) - 1;
+    if (path_len > 0) {
+        memcpy(map_info.path, line_p, path_len);
+    }
+    map_info.path[path_len] = '\0';
+
+    return true;
+}
+
 [[maybe_unused]] std::vector<MapInfo> MapInfo::Scan(std::string_view pid) {
     std::vector<MapInfo> info;
     info.reserve(2048);
@@ -760,11 +816,12 @@ static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t 
 
     if (pid.length() > 64 - 12) return info;
     char path[64];
-    if (pid == "self") {
-        strlcpy(path, "/proc/self/maps", sizeof(path));
-    } else {
-        snprintf(path, sizeof(path), "/proc/%.*s/maps", static_cast<int>(pid.length()), pid.data());
-    }
+    char* ptr = path;
+    std::memcpy(ptr, "/proc/", 6);
+    ptr += 6;
+    std::memcpy(ptr, pid.data(), pid.length());
+    ptr += pid.length();
+    std::memcpy(ptr, "/maps", 6);
 
     int fd = (int)syscall(__NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return info;
@@ -786,56 +843,9 @@ static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t 
             const char *line_end = static_cast<const char *>(memchr(p, '\n', end - p));
             if (!line_end) break;
 
-            const char* line_p = p;
-            uintptr_t map_start = 0, map_end = 0, map_off = 0;
-            uint64_t map_inode = 0;
-            uintptr_t major = 0, minor = 0;
-            if (ParseHex(line_p, line_end, &map_start) && line_p < line_end && *line_p == '-') {
-                line_p++;
-                if (ParseHex(line_p, line_end, &map_end)) {
-                    SkipSpace(line_p, line_end);
-
-                    bool read = false, write = false, exec = false, is_private = false;
-                    if (line_p < line_end) { read = (*line_p == 'r'); line_p++; }
-                    if (line_p < line_end) { write = (*line_p == 'w'); line_p++; }
-                    if (line_p < line_end) { exec = (*line_p == 'x'); line_p++; }
-                    if (line_p < line_end) { is_private = (*line_p == 'p'); line_p++; }
-                    if (line_p < line_end && *line_p != ' ') line_p++;
-                    SkipSpace(line_p, line_end);
-
-                    if (ParseHex(line_p, line_end, &map_off)) {
-                        SkipSpace(line_p, line_end);
-
-                        if (ParseHex(line_p, line_end, &major) && line_p < line_end && *line_p == ':') {
-                            line_p++;
-                            if (ParseHex(line_p, line_end, &minor)) {
-                                SkipSpace(line_p, line_end);
-
-                                if (ParseDec(line_p, line_end, &map_inode)) {
-                                    SkipSpace(line_p, line_end);
-
-                                    uint8_t perms = 0;
-                                    if (read) perms |= PROT_READ;
-                                    if (write) perms |= PROT_WRITE;
-                                    if (exec) perms |= PROT_EXEC;
-
-                                    auto &ref = info.emplace_back(MapInfo{
-                                            map_start, map_end, perms, is_private, map_off,
-                                            static_cast<dev_t>(makedev(major, minor)),
-                                            static_cast<ino_t>(map_inode), {0}
-                                    });
-
-                                    size_t path_len = line_end - line_p;
-                                    if (path_len >= sizeof(ref.path)) path_len = sizeof(ref.path) - 1;
-                                    if (path_len > 0) {
-                                        memcpy(ref.path, line_p, path_len);
-                                    }
-                                    ref.path[path_len] = '\0';
-                                }
-                            }
-                        }
-                    }
-                }
+            MapInfo map_info;
+            if (ParseMapLine(p, line_end, map_info)) {
+                info.push_back(map_info);
             }
             p = line_end + 1;
         }
