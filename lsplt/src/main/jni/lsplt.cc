@@ -221,16 +221,49 @@ public:
 
     // filter out ignored
     void Filter(const std::vector<HookRequest> &register_info) {
-        // Optimized using erase-remove idiom to achieve O(N) complexity instead of O(N^2)
+        if (register_info.empty()) {
+            data.clear();
+            return;
+        }
+
+        std::vector<const HookRequest*> sorted_reg;
+        sorted_reg.reserve(register_info.size());
+        for (const auto& reg : register_info) {
+            sorted_reg.push_back(&reg);
+        }
+
+        std::sort(sorted_reg.begin(), sorted_reg.end(), [](const HookRequest* a, const HookRequest* b) {
+            if (a->dev != b->dev) return a->dev < b->dev;
+            return a->inode < b->inode;
+        });
+
+        // Optimized using erase-remove idiom and binary search to achieve O(N log M) complexity
         auto it = std::remove_if(data.begin(), data.end(), [&](const auto &info) {
-            bool matched = std::any_of(register_info.begin(), register_info.end(),
-                                       [&](const auto &reg) { return info.Match(reg); });
-            if (matched) {
-                LOGV("match hook info %s:%lu %" PRIxPTR " %" PRIxPTR "-%" PRIxPTR, info.path,
-                     info.inode, info.start, info.end, info.offset);
-                return false;
+            size_t low = 0, high = sorted_reg.size();
+            while (low < high) {
+                size_t mid = low + (high - low) / 2;
+                const HookRequest* mid_reg = sorted_reg[mid];
+                if (mid_reg->dev < info.dev || (mid_reg->dev == info.dev && mid_reg->inode < info.inode)) {
+                    low = mid + 1;
+                } else {
+                    high = mid;
+                }
             }
-            return true;
+
+            size_t req_idx = low;
+            while (req_idx < sorted_reg.size()) {
+                const HookRequest* reg = sorted_reg[req_idx];
+                if (reg->dev != info.dev || reg->inode != info.inode) {
+                    break;
+                }
+                if (info.Match(*reg)) {
+                    LOGV("match hook info %s:%lu %" PRIxPTR " %" PRIxPTR "-%" PRIxPTR, info.path,
+                         info.inode, info.start, info.end, info.offset);
+                    return false; // keep it
+                }
+                ++req_idx;
+            }
+            return true; // remove it
         });
         data.erase(it, data.end());
     }
