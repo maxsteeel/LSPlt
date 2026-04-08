@@ -787,7 +787,9 @@ static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t 
             map_info.dev = dev;
             map_info.inode = inode;
 
-            snprintf(map_info.path, sizeof(map_info.path), "%s", name);
+            if (strlcpy(map_info.path, name, sizeof(map_info.path)) >= sizeof(map_info.path)) {
+                map_info.path[0] = '\0';
+            }
             info_vec->push_back(map_info);
         }
     }
@@ -841,11 +843,14 @@ static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_
     map_info.inode = static_cast<ino_t>(map_inode);
 
     size_t path_len = line_end - line_p;
-    if (path_len >= sizeof(map_info.path)) path_len = sizeof(map_info.path) - 1;
-    if (path_len > 0) {
-        memcpy(map_info.path, line_p, path_len);
+    if (path_len >= sizeof(map_info.path)) {
+        map_info.path[0] = '\0';
+    } else {
+        if (path_len > 0) {
+            memcpy(map_info.path, line_p, path_len);
+        }
+        map_info.path[path_len] = '\0';
     }
-    map_info.path[path_len] = '\0';
 
     return true;
 }
