@@ -411,12 +411,7 @@ public:
             if (new_addr == MAP_FAILED) {
                 return false;
             }
-            static const uintptr_t page_size = getpagesize();
-            for (uintptr_t src = reinterpret_cast<uintptr_t>(backup_addr), dest = info.start,
-                           end = info.start + len;
-                 dest < end; src += page_size, dest += page_size) {
-                memcpy(reinterpret_cast<void *>(dest), reinterpret_cast<void *>(src), page_size);
-            }
+            memcpy(reinterpret_cast<void *>(info.start), backup_addr, len);
             mprotect(reinterpret_cast<void *>(info.start), len, info.perms);
             info.backup = reinterpret_cast<uintptr_t>(backup_addr);
         }
