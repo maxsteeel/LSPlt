@@ -16,6 +16,7 @@
 #include <vector>
 #include <algorithm>
 #include <cstring>
+#include <linux/limits.h>
 
 #include "elf_util.hpp"
 #include "logging.hpp"
@@ -657,11 +658,20 @@ static inline bool ParseDec(const char*& p, const char* end, T* val) {
 #define PAGE_START(x) ((x) & ~(PAGE_SIZE - 1))
 #define PAGE_END(x) PAGE_START((x) + (PAGE_SIZE - 1))
 
+struct DlIterateData {
+    std::vector<MapInfo> *info_vec;
+    char cached_path[PATH_MAX];
+    bool cached_success;
+    ino_t cached_inode;
+    dev_t cached_dev;
+};
+
 static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t size, void *data) {
-    auto *info_vec = static_cast<std::vector<MapInfo> *>(data);
+    auto *iter_data = static_cast<DlIterateData *>(data);
+    auto *info_vec = iter_data->info_vec;
 
     const char *name = info->dlpi_name;
-    char exe_path[256];
+    char exe_path[PATH_MAX];
     if (!name || name[0] == '\0') {
         ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
         if (len != -1) {
@@ -675,16 +685,33 @@ static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t 
     struct stat st;
     ino_t inode = 0;
     dev_t dev = 0;
+
     if (name[0] == '/') {
-        char clean_name[256];
-        snprintf(clean_name, sizeof(clean_name), "%s", name);
-        char* exclamation = strstr(clean_name, "!/");
-        if (exclamation) {
-            *exclamation = '\0';
-        }
-        if (stat(clean_name, &st) == 0) {
-            inode = st.st_ino;
-            dev = st.st_dev;
+        const char* exclamation = strstr(name, "!/");
+        size_t path_len = exclamation ? static_cast<size_t>(exclamation - name) : strlen(name);
+
+        if (path_len < PATH_MAX) {
+            if (iter_data->cached_path[0] != '\0' && strncmp(name, iter_data->cached_path, path_len) == 0 && iter_data->cached_path[path_len] == '\0') {
+                if (iter_data->cached_success) {
+                    inode = iter_data->cached_inode;
+                    dev = iter_data->cached_dev;
+                }
+            } else {
+                char clean_name[PATH_MAX];
+                memcpy(clean_name, name, path_len);
+                clean_name[path_len] = '\0';
+
+                memcpy(iter_data->cached_path, clean_name, path_len + 1);
+                if (stat(clean_name, &st) == 0) {
+                    inode = st.st_ino;
+                    dev = st.st_dev;
+                    iter_data->cached_inode = inode;
+                    iter_data->cached_dev = dev;
+                    iter_data->cached_success = true;
+                } else {
+                    iter_data->cached_success = false;
+                }
+            }
         }
     }
 
@@ -721,7 +748,13 @@ static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t 
     info.reserve(2048);
 
     if (pid == "self") {
-        dl_iterate_phdr(DlIterateCallback, &info);
+        DlIterateData iter_data;
+        iter_data.info_vec = &info;
+        iter_data.cached_path[0] = '\0';
+        iter_data.cached_success = false;
+        iter_data.cached_inode = 0;
+        iter_data.cached_dev = 0;
+        dl_iterate_phdr(DlIterateCallback, &iter_data);
         return info;
     }
 
