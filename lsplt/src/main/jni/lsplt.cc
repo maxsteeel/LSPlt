@@ -478,6 +478,7 @@ public:
         if (register_info.empty()) return true;
         bool res = true;
 
+        // Sort by callback address for O(log N) binary search
         qsort(register_info.data(), register_info.size(), sizeof(HookRequest),
             +[](const void* a, const void* b) -> int {
                 const auto* req1 = static_cast<const HookRequest*>(a);
@@ -493,8 +494,10 @@ public:
             auto &info = *info_iter;
             if (info.hooks.empty()) continue;
 
-            for (auto hook_it = info.hooks.begin(); hook_it != info.hooks.end(); ) {
-                uintptr_t hook_cb = hook_it->second;
+            // Iterate using index to prevent iterator invalidation when PatchPLTEntry erases elements
+            for (size_t i = 0; i < info.hooks.size(); ) {
+                uintptr_t hook_addr = info.hooks[i].first;
+                uintptr_t hook_cb = info.hooks[i].second;
 
                 size_t low = 0, high = register_info.size();
                 while (low < high) {
@@ -512,28 +515,34 @@ public:
                 while (req_idx < register_info.size() && 
                        reinterpret_cast<uintptr_t>(register_info[req_idx].callback) == hook_cb) {
                     auto &req = register_info[req_idx];
-                    if (info.dev == req.dev && info.inode == req.inode) {
+                    // Check symbol[0] to ensure we don't process the same request twice
+                    if (req.symbol[0] != '\0' && info.dev == req.dev && info.inode == req.inode) {
                         LOGV("found matching hook for symbol [%s] at address %p.",
                              req.symbol, reinterpret_cast<void *>(hook_cb));
-                        bool restored = PatchPLTEntry(hook_it->first, hook_it->second, nullptr);
+
+                        bool restored = PatchPLTEntry(hook_addr, hook_cb, nullptr);
                         res = restored && res;
-                        req.callback = nullptr;
+
+                        // Mark as processed using the symbol string.
+                        // This preserves the 'callback' value, keeping the array perfectly sorted!
+                        req.symbol[0] = '\0';
                         matched_and_restored = true;
                     }
                     ++req_idx;
                 }
 
-                if (matched_and_restored) {
-                    hook_it = info.hooks.erase(hook_it);
-                } else {
-                    ++hook_it;
+                // If PatchPLTEntry successfully restored, it erased the element at index i.
+                // The next element shifts into index i automatically. We only increment if no erase occurred.
+                if (!matched_and_restored) {
+                    ++i;
                 }
             }
         }
 
+        // In-place compression cleanup based on our new marker
         size_t write_idx = 0;
         for (size_t read_idx = 0; read_idx < register_info.size(); ++read_idx) {
-            if (register_info[read_idx].callback != nullptr) {
+            if (register_info[read_idx].symbol[0] != '\0') {
                 register_info[write_idx++] = register_info[read_idx];
             }
         }
