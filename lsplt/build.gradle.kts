@@ -38,11 +38,11 @@ android {
     compileSdk = androidCompileSdkVersion
     ndkVersion = androidNdkVersion
     buildToolsVersion = androidBuildToolsVersion
+    androidResources.enable = false
 
     buildFeatures {
         buildConfig = false
         prefabPublishing = true
-        androidResources = false
         prefab = true
     }
 
@@ -60,7 +60,6 @@ android {
 
     defaultConfig {
         minSdk = androidMinSdkVersion
-        targetSdk = androidTargetSdkVersion
     }
 
     compileOptions {
@@ -100,7 +99,7 @@ android {
                     arguments(
                         "-DCMAKE_CXX_FLAGS_RELEASE=$configFlags",
                         "-DCMAKE_C_FLAGS_RELEASE=$configFlags",
-                        "-DDEBUG_SYMBOLS_PATH=${project.buildDir.absolutePath}/symbols/$name",
+                        "-DDEBUG_SYMBOLS_PATH=${layout.buildDirectory.get().asFile.absolutePath}/symbols/$name",
                         "-DANDROID_SUPPORT_FLEXIBLE_PAGE_SIZES=ON"
                     )
                     findInPath("ccache")?.let {
@@ -156,6 +155,7 @@ android {
     lint {
         abortOnError = true
         checkReleaseBuilds = false
+        targetSdk = androidTargetSdkVersion
     }
 
     externalNativeBuild {
@@ -179,14 +179,14 @@ android {
 }
 
 val symbolsReleaseTask = tasks.register<Jar>("generateReleaseSymbolsJar") {
-    from("${project.buildDir.absolutePath}/symbols/release")
+    from(layout.buildDirectory.dir("symbols/release"))
     exclude("**/dex_builder")
     archiveClassifier.set("symbols")
     archiveBaseName.set("release")
 }
 
 val symbolsStandaloneTask = tasks.register<Jar>("generateStandaloneSymbolsJar") {
-    from("${project.buildDir.absolutePath}/symbols/standalone")
+    from(layout.buildDirectory.dir("symbols/standalone"))
     exclude("**/dex_builder")
     archiveClassifier.set("symbols")
     archiveBaseName.set("standalone")
@@ -259,7 +259,7 @@ publishing {
         }
     }
     dependencies {
-        "standaloneCompileOnly"("dev.rikka.ndk.thirdparty:cxx:1.2.0")
+        "standaloneCompileOnly"("org.lsposed.libcxx:libcxx:29.0.14206865")
     }
 }
 

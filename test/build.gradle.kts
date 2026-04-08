@@ -51,8 +51,8 @@ android {
 
     testOptions {
         managedDevices {
-            devices {
-                fun createDevice(api: Int, is64: Boolean, target: String = "default") = create<ManagedVirtualDevice>("""avd-$api-${if(is64) "x86_64" else "x86"}-$target""") {
+            localDevices {
+                fun createDevice(api: Int, is64: Boolean, target: String = "default") = create("""avd-$api-${if(is64) "x86_64" else "x86"}-$target""") {
                     device = "Pixel 2"
                     apiLevel = api
                     systemImageSource = target
@@ -84,6 +84,9 @@ android {
                 createDevice(32, true, "aosp_atd")
                 createDevice(33, true, "aosp_atd")
                 createDevice(34, true, "aosp_atd")
+                createDevice(35, true, "aosp_atd")
+                createDevice(36, true, "aosp_atd")
+                
             }
         }
     }
@@ -98,19 +101,25 @@ dependencies {
 }
 
 afterEvaluate {
-    task("testOnAllMVDs") {
+    val gradlewPath = File(rootProject.projectDir, "gradlew").absolutePath
+    val pName = project.name
+
+    tasks.register("testOnAllMVDs") {
         dependsOn("assembleAndroidTest")
         doLast {
-            tasks.withType(ManagedDeviceInstrumentationTestTask::class.java) {
-                println("::group::$this")
-                exec {
-                    executable = "${rootProject.buildFile.parent}/gradlew"
-                    args = listOf(":${project.name}:$name")
-                }
-                exec {
-                    executable = "${rootProject.buildFile.parent}/gradlew"
-                    args = listOf(":${project.name}:cleanManagedDevices")
-                }
+            project.tasks.withType(ManagedDeviceInstrumentationTestTask::class.java).forEach { mvdTask ->
+                println("::group::${mvdTask.name}")
+
+                ProcessBuilder(gradlewPath, ":$pName:${mvdTask.name}")
+                    .inheritIO()
+                    .start()
+                    .waitFor()
+
+                ProcessBuilder(gradlewPath, ":$pName:cleanManagedDevices")
+                    .inheritIO()
+                    .start()
+                    .waitFor()
+
                 println("::endgroup::")
             }
         }
