@@ -834,10 +834,7 @@ struct DlIterateData {
     bool exe_path_loaded;
 };
 
-static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t size, void *data) {
-    auto *iter_data = static_cast<DlIterateData *>(data);
-    auto *info_vec = iter_data->info_vec;
-
+static const char* ResolveExePathIfNeeded(struct dl_phdr_info *info, DlIterateData *iter_data) {
     const char *name = info->dlpi_name;
     if (!name || name[0] == '\0') {
         if (!iter_data->exe_path_loaded) {
@@ -849,41 +846,54 @@ static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t 
             }
             iter_data->exe_path_loaded = true;
         }
-        name = iter_data->exe_path;
+        return iter_data->exe_path;
     }
+    return name;
+}
 
-    struct stat st;
-    ino_t inode = 0;
-    dev_t dev = 0;
+static void GetInodeAndDev(const char* name, DlIterateData* iter_data, ino_t& inode, dev_t& dev) {
+    inode = 0;
+    dev = 0;
+    if (name[0] != '/') return;
 
-    if (name[0] == '/') {
-        const char* exclamation = strstr(name, "!/");
-        size_t path_len = exclamation ? static_cast<size_t>(exclamation - name) : strlen(name);
+    const char* exclamation = strstr(name, "!/");
+    size_t path_len = exclamation ? static_cast<size_t>(exclamation - name) : strlen(name);
 
-        if (path_len < PATH_MAX) {
-            if (iter_data->cached_path[0] != '\0' && strncmp(name, iter_data->cached_path, path_len) == 0 && iter_data->cached_path[path_len] == '\0') {
-                if (iter_data->cached_success) {
-                    inode = iter_data->cached_inode;
-                    dev = iter_data->cached_dev;
-                }
-            } else {
-                char clean_name[PATH_MAX];
-                memcpy(clean_name, name, path_len);
-                clean_name[path_len] = '\0';
+    if (path_len >= PATH_MAX) return;
 
-                memcpy(iter_data->cached_path, clean_name, path_len + 1);
-                if (stat(clean_name, &st) == 0) {
-                    inode = st.st_ino;
-                    dev = st.st_dev;
-                    iter_data->cached_inode = inode;
-                    iter_data->cached_dev = dev;
-                    iter_data->cached_success = true;
-                } else {
-                    iter_data->cached_success = false;
-                }
-            }
+    if (iter_data->cached_path[0] != '\0' && strncmp(name, iter_data->cached_path, path_len) == 0 && iter_data->cached_path[path_len] == '\0') {
+        if (iter_data->cached_success) {
+            inode = iter_data->cached_inode;
+            dev = iter_data->cached_dev;
+        }
+    } else {
+        char clean_name[PATH_MAX];
+        memcpy(clean_name, name, path_len);
+        clean_name[path_len] = '\0';
+
+        memcpy(iter_data->cached_path, clean_name, path_len + 1);
+        struct stat st;
+        if (stat(clean_name, &st) == 0) {
+            inode = st.st_ino;
+            dev = st.st_dev;
+            iter_data->cached_inode = inode;
+            iter_data->cached_dev = dev;
+            iter_data->cached_success = true;
+        } else {
+            iter_data->cached_success = false;
         }
     }
+}
+
+static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t size, void *data) {
+    auto *iter_data = static_cast<DlIterateData *>(data);
+    auto *info_vec = iter_data->info_vec;
+
+    const char *name = ResolveExePathIfNeeded(info, iter_data);
+
+    ino_t inode = 0;
+    dev_t dev = 0;
+    GetInodeAndDev(name, iter_data, inode, dev);
 
     for (int i = 0; i < info->dlpi_phnum; i++) {
         const ElfW(Phdr) *phdr = &info->dlpi_phdr[i];
