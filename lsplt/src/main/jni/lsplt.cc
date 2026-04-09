@@ -974,23 +974,19 @@ static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_
     return true;
 }
 
-[[maybe_unused]] std::vector<MapInfo> MapInfo::Scan(std::string_view pid) {
-    std::vector<MapInfo> info;
-    info.reserve(2048);
+static void ScanSelf(std::vector<MapInfo>& info) {
+    DlIterateData iter_data;
+    iter_data.info_vec = &info;
+    iter_data.cached_path[0] = '\0';
+    iter_data.cached_success = false;
+    iter_data.cached_inode = 0;
+    iter_data.cached_dev = 0;
+    iter_data.exe_path_loaded = false;
+    dl_iterate_phdr(DlIterateCallback, &iter_data);
+}
 
-    if (pid == "self") {
-        DlIterateData iter_data;
-        iter_data.info_vec = &info;
-        iter_data.cached_path[0] = '\0';
-        iter_data.cached_success = false;
-        iter_data.cached_inode = 0;
-        iter_data.cached_dev = 0;
-        iter_data.exe_path_loaded = false;
-        dl_iterate_phdr(DlIterateCallback, &iter_data);
-        return info;
-    }
-
-    if (pid.length() > 64 - 12) return info;
+static void ScanPid(std::vector<MapInfo>& info, std::string_view pid) {
+    if (pid.length() > 64 - 12) return;
     char path[64];
     char* ptr = path;
     std::memcpy(ptr, "/proc/", 6);
@@ -1000,7 +996,7 @@ static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_
     std::memcpy(ptr, "/maps", 6);
 
     int fd = (int)syscall(__NR_openat, AT_FDCWD, path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return info;
+    if (fd < 0) return;
 
     char buffer[16384];
     size_t data_len = 0;
@@ -1035,6 +1031,18 @@ static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_
         }
     }
     syscall(__NR_close, fd);
+}
+
+[[maybe_unused]] std::vector<MapInfo> MapInfo::Scan(std::string_view pid) {
+    std::vector<MapInfo> info;
+    info.reserve(2048);
+
+    if (pid == "self") {
+        ScanSelf(info);
+    } else {
+        ScanPid(info, pid);
+    }
+
     return info;
 }
 
