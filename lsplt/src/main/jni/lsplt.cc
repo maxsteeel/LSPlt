@@ -226,7 +226,8 @@ public:
             return;
         }
 
-        std::vector<const HookRequest*> sorted_reg;
+        static std::vector<const HookRequest*> sorted_reg;
+        sorted_reg.clear();
         sorted_reg.reserve(register_info.size());
         for (const auto& reg : register_info) {
             sorted_reg.push_back(&reg);
@@ -396,20 +397,24 @@ public:
      *
      */
 
-    bool PatchPLTEntry(uintptr_t addr, uintptr_t callback, uintptr_t *backup) {
-        LOGV("hooking %p", reinterpret_cast<void *>(addr));
-        auto iter = std::upper_bound(data.begin(), data.end(), addr, [](uintptr_t a, const HookInfo& hi) {
-            return a < hi.start;
+    struct PendingPatch {
+        uintptr_t addr;
+        uintptr_t callback;
+        uintptr_t *backup;
+    };
+
+    bool BatchPatchPLTEntries(HookInfo& info, std::vector<PendingPatch>& patches) {
+        if (patches.empty()) return true;
+
+        std::sort(patches.begin(), patches.end(), [](const PendingPatch& a, const PendingPatch& b) {
+            return a.addr < b.addr;
         });
-        if (iter == data.begin()) return false;
-        --iter;
-        if (addr >= iter->end) return false;
-        auto &info = *iter;
+
         const auto len = info.end - info.start;
         if (!info.backup && !info.self) {
             // let os find a suitable address
             auto *backup_addr = sys_mmap(nullptr, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-            LOGD("backup %p to %p", reinterpret_cast<void *>(addr), backup_addr);
+            LOGD("backup %p to %p", reinterpret_cast<void *>(info.start), backup_addr);
             if (backup_addr == MAP_FAILED) return false;
             if (auto *new_addr =
                     sys_mremap(reinterpret_cast<void *>(info.start), len, len,
@@ -440,30 +445,66 @@ public:
             }
             memcpy(reinterpret_cast<void *>(info.start), backup_addr, len);
             mprotect(reinterpret_cast<void *>(info.start), len, info.perms);
+            LOGD("backup %p mapped %p", reinterpret_cast<void *>(info.start), new_addr);
             info.backup = reinterpret_cast<uintptr_t>(backup_addr);
         }
 
-        auto *the_addr = reinterpret_cast<uintptr_t *>(addr);
-        auto the_backup = *the_addr;
-        if (*the_addr != callback) {
-            if (mprotect(PageStart(addr), getpagesize(), info.perms | PROT_WRITE) == 0) {
-                *the_addr = callback;
-                mprotect(PageStart(addr), getpagesize(), info.perms);
-                if (backup) *backup = the_backup;
-                __builtin___clear_cache(reinterpret_cast<char *>(the_addr), reinterpret_cast<char *>(the_addr + 1));
-            } else {
-                PLOGE("mprotect failed to add PROT_WRITE for patching");
-                return false;
+        bool res = true;
+        uintptr_t current_page = 0;
+        bool page_unprotected = false;
+
+        for (const auto& patch : patches) {
+            uintptr_t addr = patch.addr;
+            uintptr_t callback = patch.callback;
+            uintptr_t *backup = patch.backup;
+
+            if (addr < info.start || addr >= info.end) {
+                res = false;
+                continue;
             }
-        } else {
-            LOGV("the address already has the expected callback, no need to patch");
+
+            auto *the_addr = reinterpret_cast<uintptr_t *>(addr);
+            auto the_backup = *the_addr;
+
+            if (*the_addr != callback) {
+                uintptr_t page_start = reinterpret_cast<uintptr_t>(PageStart(addr));
+                
+                if (page_start != current_page) {
+                    if (page_unprotected) {
+                        mprotect(reinterpret_cast<void*>(current_page), getpagesize(), info.perms);
+                    }
+                    if (mprotect(reinterpret_cast<void*>(page_start), getpagesize(), info.perms | PROT_WRITE) == 0) {
+                        current_page = page_start;
+                        page_unprotected = true;
+                    } else {
+                        PLOGE("mprotect failed to add PROT_WRITE for patching");
+                        page_unprotected = false;
+                        res = false;
+                        continue;
+                    }
+                }
+
+                if (page_unprotected) {
+                    *the_addr = callback;
+                    if (backup) *backup = the_backup;
+                    __builtin___clear_cache(reinterpret_cast<char *>(the_addr), reinterpret_cast<char *>(the_addr + 1));
+                }
+            } else {
+                LOGV("the address already has the expected callback, no need to patch");
+            }
+
+            auto hook_iter = std::lower_bound(info.hooks.begin(), info.hooks.end(), addr, [](const auto& p, uintptr_t a){ return p.first < a; });
+            if (hook_iter != info.hooks.end() && hook_iter->first == addr) {
+                if (hook_iter->second == callback) info.hooks.erase(hook_iter);
+            } else {
+                info.hooks.insert(hook_iter, {addr, the_backup});
+            }
         }
-        auto hook_iter = std::lower_bound(info.hooks.begin(), info.hooks.end(), addr, [](const auto& p, uintptr_t a){ return p.first < a; });
-        if (hook_iter != info.hooks.end() && hook_iter->first == addr) {
-            if (hook_iter->second == callback) info.hooks.erase(hook_iter); // Remove if matching
-        } else {
-            info.hooks.insert(hook_iter, {addr, the_backup}); // Insert in sorted order
+
+        if (page_unprotected) {
+            mprotect(reinterpret_cast<void*>(current_page), getpagesize(), info.perms);
         }
+
         if (info.hooks.empty() && !info.self) {
             LOGV("restore %p from %p", reinterpret_cast<void *>(info.start),
                  reinterpret_cast<void *>(info.backup));
@@ -477,7 +518,7 @@ public:
             }
             info.backup = 0;
         }
-        return true;
+        return res;
     }
 
     /**
@@ -515,12 +556,16 @@ public:
                 return reinterpret_cast<uintptr_t>(a.callback) < reinterpret_cast<uintptr_t>(b.callback);
         });
 
+        std::vector<PendingPatch> patches;
+
         for (auto info_iter = rbegin(); info_iter != rend(); ++info_iter) {
             auto &info = *info_iter;
             if (info.hooks.empty()) continue;
 
+            patches.clear();
+
             // Iterate using index to prevent iterator invalidation when PatchPLTEntry erases elements
-            for (size_t i = 0; i < info.hooks.size(); ) {
+            for (size_t i = 0; i < info.hooks.size(); ++i) {
                 uintptr_t hook_addr = info.hooks[i].first;
                 uintptr_t hook_cb = info.hooks[i].second;
 
@@ -534,9 +579,7 @@ public:
                     }
                 }
 
-                bool matched_and_restored = false;
                 size_t req_idx = low;
-
                 while (req_idx < register_info.size() && 
                        reinterpret_cast<uintptr_t>(register_info[req_idx].callback) == hook_cb) {
                     auto &req = register_info[req_idx];
@@ -545,22 +588,18 @@ public:
                         LOGV("found matching hook for symbol [%s] at address %p.",
                              req.symbol, reinterpret_cast<void *>(hook_cb));
 
-                        bool restored = PatchPLTEntry(hook_addr, hook_cb, nullptr);
-                        res = restored && res;
+                        patches.push_back({hook_addr, hook_cb, nullptr});
 
                         // Mark as processed using the symbol string.
                         // This preserves the 'callback' value, keeping the array perfectly sorted!
                         req.symbol[0] = '\0';
-                        matched_and_restored = true;
                     }
                     ++req_idx;
                 }
+            }
 
-                // If PatchPLTEntry successfully restored, it erased the element at index i.
-                // The next element shifts into index i automatically. We only increment if no erase occurred.
-                if (!matched_and_restored) {
-                    ++i;
-                }
+            if (!patches.empty()) {
+                res = BatchPatchPLTEntries(info, patches) && res;
             }
         }
 
@@ -579,6 +618,7 @@ public:
     bool ProcessRequest(std::vector<HookRequest> &register_info) {
         bool res = true;
         std::vector<uintptr_t> possible_addr;
+        possible_addr.reserve(4); // Pre-reserve capacity to minimize heap allocations
 
         std::sort(register_info.begin(), register_info.end(), [](const HookRequest &a, const HookRequest &b) {
             if (a.dev != b.dev) return a.dev < b.dev;
@@ -587,6 +627,10 @@ public:
         });
 
         HookInfo* last_matched_info = nullptr;
+        static std::vector<std::vector<PendingPatch>> grouped_patches;
+
+        if (grouped_patches.size() < data.size()) grouped_patches.resize(data.size());
+        for (size_t i = 0; i < data.size(); ++i) grouped_patches[i].clear();
 
         auto iter = std::remove_if(register_info.begin(), register_info.end(), [&](const HookRequest &reg) {
             bool processed = false;
@@ -613,9 +657,20 @@ public:
                     } else {
                         LOGV("patching PLT entry for %s", reg.symbol);
                         for (auto addr : possible_addr) {
-                            res = PatchPLTEntry(addr, reinterpret_cast<uintptr_t>(reg.callback),
-                                                reinterpret_cast<uintptr_t *>(reg.backup)) &&
-                                  res;
+                            auto target_iter = std::upper_bound(data.begin(), data.end(), addr, [](uintptr_t a, const HookInfo& hi) {
+                                return a < hi.start;
+                            });
+                            if (target_iter != data.begin()) {
+                                --target_iter;
+                                if (addr < target_iter->end) {
+                                    size_t target_idx = std::distance(data.begin(), target_iter);
+                                    grouped_patches[target_idx].push_back({addr, reinterpret_cast<uintptr_t>(reg.callback), reinterpret_cast<uintptr_t*>(reg.backup)});
+                                } else { 
+                                    res = false; 
+                                }
+                            } else { 
+                                res = false; 
+                            }
                         }
                     }
                 }
@@ -623,7 +678,15 @@ public:
             }
             return processed;
         });
+
         register_info.erase(iter, register_info.end());
+
+        for (size_t i = 0; i < data.size(); ++i) {
+            if (!grouped_patches[i].empty()) {
+                res = BatchPatchPLTEntries(data[i], grouped_patches[i]) && res;
+            }
+        }
+
         return res;
     }
 
