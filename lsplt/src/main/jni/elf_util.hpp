@@ -52,6 +52,14 @@ class Elf {
     bool is_use_rela_ = false;
     bool valid_ = false;
 
+    struct Reloc {
+        uint32_t sym;
+        ElfW(Addr) addr;
+    };
+    std::vector<Reloc> plt_relocs_;
+    std::vector<Reloc> dyn_relocs_;
+
+    void BuildRelocIndex();
     uint32_t GnuLookup(const SymName& name) const;
     uint32_t ElfLookup(const SymName& name) const;
     uint32_t LinearLookup(const SymName& name) const;
