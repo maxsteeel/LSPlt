@@ -61,46 +61,48 @@ inline bool MatchSymName(const SymName& name, const char* sym_name) {
 
 }  // namespace
 
-Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
-    header_ = reinterpret_cast<decltype(header_)>(base_addr);
-
+bool Elf::ParseHeader() {
     // check magic
-    if (0 != memcmp(header_->e_ident, ELFMAG, SELFMAG)) return;
+    if (0 != memcmp(header_->e_ident, ELFMAG, SELFMAG)) return false;
 
         // check class (64/32)
 #if defined(__LP64__)
-    if (ELFCLASS64 != header_->e_ident[EI_CLASS]) return;
+    if (ELFCLASS64 != header_->e_ident[EI_CLASS]) return false;
 #else
-    if (ELFCLASS32 != header_->e_ident[EI_CLASS]) return;
+    if (ELFCLASS32 != header_->e_ident[EI_CLASS]) return false;
 #endif
 
     // check endian (little/big)
-    if (ELFDATA2LSB != header_->e_ident[EI_DATA]) return;
+    if (ELFDATA2LSB != header_->e_ident[EI_DATA]) return false;
 
     // check version
-    if (EV_CURRENT != header_->e_ident[EI_VERSION]) return;
+    if (EV_CURRENT != header_->e_ident[EI_VERSION]) return false;
 
     // check type
-    if (ET_EXEC != header_->e_type && ET_DYN != header_->e_type) return;
+    if (ET_EXEC != header_->e_type && ET_DYN != header_->e_type) return false;
 
         // check machine
 #if defined(__arm__)
-    if (EM_ARM != header_->e_machine) return;
+    if (EM_ARM != header_->e_machine) return false;
 #elif defined(__aarch64__)
-    if (EM_AARCH64 != header_->e_machine) return;
+    if (EM_AARCH64 != header_->e_machine) return false;
 #elif defined(__i386__)
-    if (EM_386 != header_->e_machine) return;
+    if (EM_386 != header_->e_machine) return false;
 #elif defined(__x86_64__)
-    if (EM_X86_64 != header_->e_machine) return;
+    if (EM_X86_64 != header_->e_machine) return false;
 #elif defined(__riscv)
-    if (EM_RISCV != header_->e_machine) return;
+    if (EM_RISCV != header_->e_machine) return false;
 #else
-    return;
+    return false;
 #endif
 
     // check version
-    if (EV_CURRENT != header_->e_version) return;
+    if (EV_CURRENT != header_->e_version) return false;
 
+    return true;
+}
+
+bool Elf::ParseDynamicTable() {
     program_header_ = OffsetOf<decltype(program_header_)>(header_, header_->e_phoff);
 
     auto ph_off = reinterpret_cast<uintptr_t>(program_header_);
@@ -115,7 +117,7 @@ Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
             dynamic_size_ = program_header->p_memsz;
         }
     }
-    if (!dynamic_ || !bias_addr_) return;
+    if (!dynamic_ || !bias_addr_) return false;
     dynamic_ =
         reinterpret_cast<decltype(dynamic_)>(bias_addr_ + reinterpret_cast<uintptr_t>(dynamic_));
 
@@ -127,11 +129,11 @@ Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
             dynamic = dynamic_end;
             break;
         case DT_STRTAB: {
-            if (!SetByOffset(dyn_str_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return;
+            if (!SetByOffset(dyn_str_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return false;
             break;
         }
         case DT_SYMTAB: {
-            if (!SetByOffset(dyn_sym_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return;
+            if (!SetByOffset(dyn_sym_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return false;
             break;
         }
         case DT_PLTREL:
@@ -139,7 +141,7 @@ Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
             is_use_rela_ = dynamic->d_un.d_val == DT_RELA;
             break;
         case DT_JMPREL: {
-            if (!SetByOffset(rel_plt_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return;
+            if (!SetByOffset(rel_plt_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return false;
             break;
         }
         case DT_PLTRELSZ:
@@ -147,7 +149,7 @@ Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
             break;
         case DT_REL:
         case DT_RELA: {
-            if (!SetByOffset(rel_dyn_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return;
+            if (!SetByOffset(rel_dyn_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return false;
             break;
         }
         case DT_RELSZ:
@@ -178,6 +180,14 @@ Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
             break;
         }
     }
+
+    return true;
+}
+
+Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
+    header_ = reinterpret_cast<decltype(header_)>(base_addr);
+    if (!ParseHeader()) return;
+    if (!ParseDynamicTable()) return;
 
     valid_ = true;
     BuildRelocIndex();
