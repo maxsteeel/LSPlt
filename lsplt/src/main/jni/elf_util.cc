@@ -183,58 +183,59 @@ Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
     BuildRelocIndex();
 }
 
-void Elf::BuildRelocIndex() {
-    auto looper = [&]<typename T>(auto begin, auto size, bool is_plt) -> void {
-        const auto *rel_end = reinterpret_cast<const T *>(begin + size);
-        for (const auto *rel = reinterpret_cast<const T *>(begin); rel < rel_end; ++rel) {
-            auto r_info = rel->r_info;
-            auto r_offset = rel->r_offset;
-            auto r_sym = ELF_R_SYM(r_info);
-            auto r_type = ELF_R_TYPE(r_info);
+template <typename T>
+void Elf::ProcessReloc(ElfW(Addr) begin, ElfW(Word) size, bool is_plt) {
+    const auto *rel_end = reinterpret_cast<const T *>(begin + size);
+    for (const auto *rel = reinterpret_cast<const T *>(begin); rel < rel_end; ++rel) {
+        auto r_info = rel->r_info;
+        auto r_offset = rel->r_offset;
+        auto r_sym = ELF_R_SYM(r_info);
+        auto r_type = ELF_R_TYPE(r_info);
 
-            if (is_plt && r_type != ELF_R_GENERIC_JUMP_SLOT) continue;
-            if (!is_plt && r_type != ELF_R_GENERIC_ABS && r_type != ELF_R_GENERIC_GLOB_DAT) continue;
+        if (is_plt && r_type != ELF_R_GENERIC_JUMP_SLOT) continue;
+        if (!is_plt && r_type != ELF_R_GENERIC_ABS && r_type != ELF_R_GENERIC_GLOB_DAT) continue;
 
-            auto addr = bias_addr_ + r_offset;
-            if (addr > base_addr_) {
-                if (is_plt) {
-                    plt_relocs_.push_back({(uint32_t)r_sym, addr});
-                } else {
-                    dyn_relocs_.push_back({(uint32_t)r_sym, addr});
-                }
+        auto addr = bias_addr_ + r_offset;
+        if (addr > base_addr_) {
+            if (is_plt) {
+                plt_relocs_.push_back({(uint32_t)r_sym, addr});
+            } else {
+                dyn_relocs_.push_back({(uint32_t)r_sym, addr});
             }
         }
-    };
+    }
+}
 
-    auto do_reloc = [&](auto rel, auto size, bool is_plt) {
-        if (!rel) return;
-        if (is_use_rela_) {
-            looper.template operator()<ElfW(Rela)>(rel, size, is_plt);
-        } else {
-            looper.template operator()<ElfW(Rel)>(rel, size, is_plt);
-        }
-    };
+void Elf::DoReloc(ElfW(Addr) rel, ElfW(Word) size, bool is_plt) {
+    if (!rel) return;
+    if (is_use_rela_) {
+        ProcessReloc<ElfW(Rela)>(rel, size, is_plt);
+    } else {
+        ProcessReloc<ElfW(Rel)>(rel, size, is_plt);
+    }
+}
 
+int Elf::CmpReloc(const void* a, const void* b) {
+    auto sym_a = static_cast<const Reloc*>(a)->sym;
+    auto sym_b = static_cast<const Reloc*>(b)->sym;
+    return (sym_a > sym_b) - (sym_a < sym_b);
+}
+
+void Elf::BuildRelocIndex() {
     size_t rel_size = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
     if (rel_size > 0) {
         plt_relocs_.reserve(rel_plt_size_ / rel_size);
         dyn_relocs_.reserve(rel_dyn_size_ / rel_size);
     }
 
-    do_reloc(rel_plt_, rel_plt_size_, true);
-    do_reloc(rel_dyn_, rel_dyn_size_, false);
-
-    auto cmp = [](const void* a, const void* b) -> int {
-        auto sym_a = static_cast<const Reloc*>(a)->sym;
-        auto sym_b = static_cast<const Reloc*>(b)->sym;
-        return (sym_a > sym_b) - (sym_a < sym_b);
-    };
+    DoReloc(rel_plt_, rel_plt_size_, true);
+    DoReloc(rel_dyn_, rel_dyn_size_, false);
 
     if (!plt_relocs_.empty()) {
-        qsort(plt_relocs_.data(), plt_relocs_.size(), sizeof(Reloc), cmp);
+        qsort(plt_relocs_.data(), plt_relocs_.size(), sizeof(Reloc), CmpReloc);
     }
     if (!dyn_relocs_.empty()) {
-        qsort(dyn_relocs_.data(), dyn_relocs_.size(), sizeof(Reloc), cmp);
+        qsort(dyn_relocs_.data(), dyn_relocs_.size(), sizeof(Reloc), CmpReloc);
     }
 }
 
@@ -295,6 +296,19 @@ uint32_t Elf::LinearLookup(const SymName& name) const {
     return 0;
 }
 
+size_t Elf::FindLowerBound(const std::vector<Reloc>& relocs, uint32_t target_sym) const {
+    size_t low = 0, high = relocs.size();
+    while (low < high) {
+        size_t mid = low + (high - low) / 2;
+        if (relocs[mid].sym < target_sym) {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    return low;
+}
+
 void Elf::FindPltAddr(std::string_view name, std::vector<uintptr_t> &res) const {
     res.clear();
 
@@ -304,26 +318,13 @@ void Elf::FindPltAddr(std::string_view name, std::vector<uintptr_t> &res) const 
     if (!idx) idx = LinearLookup(sym_name);
     if (!idx) return;
 
-    auto find_lower_bound = [](const std::vector<Reloc>& relocs, uint32_t target_sym) -> size_t {
-        size_t low = 0, high = relocs.size();
-        while (low < high) {
-            size_t mid = low + (high - low) / 2;
-            if (relocs[mid].sym < target_sym) {
-                low = mid + 1;
-            } else {
-                high = mid;
-            }
-        }
-        return low;
-    };
-
-    size_t plt_idx = find_lower_bound(plt_relocs_, idx);
+    size_t plt_idx = FindLowerBound(plt_relocs_, idx);
     while (plt_idx < plt_relocs_.size() && plt_relocs_[plt_idx].sym == idx) {
         res.push_back(plt_relocs_[plt_idx].addr);
         break; // original logic breaks on first is_plt
     }
 
-    size_t dyn_idx = find_lower_bound(dyn_relocs_, idx);
+    size_t dyn_idx = FindLowerBound(dyn_relocs_, idx);
     while (dyn_idx < dyn_relocs_.size() && dyn_relocs_[dyn_idx].sym == idx) {
         res.push_back(dyn_relocs_[dyn_idx].addr);
         ++dyn_idx;

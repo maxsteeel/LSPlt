@@ -59,6 +59,12 @@ class Elf {
     std::vector<Reloc> plt_relocs_;
     std::vector<Reloc> dyn_relocs_;
 
+    template <typename T>
+    void ProcessReloc(ElfW(Addr) begin, ElfW(Word) size, bool is_plt);
+    void DoReloc(ElfW(Addr) rel, ElfW(Word) size, bool is_plt);
+    static int CmpReloc(const void* a, const void* b);
+    size_t FindLowerBound(const std::vector<Reloc>& relocs, uint32_t target_sym) const;
+
     void BuildRelocIndex();
     uint32_t GnuLookup(const SymName& name) const;
     uint32_t ElfLookup(const SymName& name) const;
