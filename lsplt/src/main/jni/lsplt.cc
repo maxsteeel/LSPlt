@@ -427,13 +427,24 @@ public:
                     sys_mremap(reinterpret_cast<void *>(info.start), len, len,
                                MREMAP_FIXED | MREMAP_MAYMOVE | MREMAP_DONTUNMAP, backup_addr);
                 new_addr == MAP_FAILED || new_addr != backup_addr) {
-                new_addr = sys_mremap(reinterpret_cast<void *>(info.start), len, len,
-                                      MREMAP_FIXED | MREMAP_MAYMOVE, backup_addr);
-                if (new_addr == MAP_FAILED || new_addr != backup_addr) {
+                if (mprotect(backup_addr, len, PROT_READ | PROT_WRITE) != 0) {
+                    LOGD("fallback mprotect backup_addr to RW failed");
                     return false;
                 }
-                LOGD("backup with MREMAP_DONTUNMAP failed, tried without it");
+                if (mprotect(reinterpret_cast<void *>(info.start), len, info.perms | PROT_READ) != 0) {
+                    LOGD("fallback mprotect info.start to include READ failed");
+                    return false;
+                }
+                memcpy(backup_addr, reinterpret_cast<void *>(info.start), len);
+                mprotect(reinterpret_cast<void *>(info.start), len, info.perms);
+                if (mprotect(backup_addr, len, info.perms) != 0) {
+                    LOGD("fallback restore mprotect backup_addr failed");
+                    return false;
+                }
+                __builtin___clear_cache(reinterpret_cast<char *>(backup_addr), reinterpret_cast<char *>(backup_addr) + len);
+                LOGD("backup with MREMAP_DONTUNMAP failed, fallback to memcpy");
             }
+
             int fd = (int)syscall(__NR_openat, AT_FDCWD, info.path, O_RDONLY | O_CLOEXEC);
             void *new_addr = MAP_FAILED;
             if (fd >= 0) {
