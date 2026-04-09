@@ -459,6 +459,8 @@ public:
         bool res = true;
         uintptr_t current_page = 0;
         bool page_unprotected = false;
+        uintptr_t clear_start = 0;
+        uintptr_t clear_end = 0;
 
         for (const auto& patch : patches) {
             uintptr_t addr = patch.addr;
@@ -478,11 +480,16 @@ public:
                 
                 if (page_start != current_page) {
                     if (page_unprotected) {
+                        if (clear_start != 0) {
+                            __builtin___clear_cache(reinterpret_cast<char *>(clear_start), reinterpret_cast<char *>(clear_end));
+                        }
                         mprotect(reinterpret_cast<void*>(current_page), SysPageSize(), info.perms);
                     }
                     if (mprotect(reinterpret_cast<void*>(page_start), SysPageSize(), info.perms | PROT_WRITE) == 0) {
                         current_page = page_start;
                         page_unprotected = true;
+                        clear_start = 0;
+                        clear_end = 0;
                     } else {
                         PLOGE("mprotect failed to add PROT_WRITE for patching");
                         page_unprotected = false;
@@ -494,7 +501,14 @@ public:
                 if (page_unprotected) {
                     *the_addr = callback;
                     if (backup) *backup = the_backup;
-                    __builtin___clear_cache(reinterpret_cast<char *>(the_addr), reinterpret_cast<char *>(the_addr + 1));
+
+                    if (clear_start == 0) {
+                        clear_start = addr;
+                        clear_end = addr + sizeof(uintptr_t);
+                    } else {
+                        if (addr < clear_start) clear_start = addr;
+                        if (addr + sizeof(uintptr_t) > clear_end) clear_end = addr + sizeof(uintptr_t);
+                    }
                 }
             } else {
                 LOGV("the address already has the expected callback, no need to patch");
@@ -509,6 +523,9 @@ public:
         }
 
         if (page_unprotected) {
+            if (clear_start != 0) {
+                __builtin___clear_cache(reinterpret_cast<char *>(clear_start), reinterpret_cast<char *>(clear_end));
+            }
             mprotect(reinterpret_cast<void*>(current_page), SysPageSize(), info.perms);
         }
 
