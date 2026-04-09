@@ -462,6 +462,10 @@ public:
         uintptr_t clear_start = 0;
         uintptr_t clear_end = 0;
 
+        std::vector<std::pair<uintptr_t, uintptr_t>> new_hooks;
+        new_hooks.reserve(info.hooks.size() + patches.size());
+        auto hook_it = info.hooks.begin();
+
         for (const auto& patch : patches) {
             uintptr_t addr = patch.addr;
             uintptr_t callback = patch.callback;
@@ -514,13 +518,26 @@ public:
                 LOGV("the address already has the expected callback, no need to patch");
             }
 
-            auto hook_iter = std::lower_bound(info.hooks.begin(), info.hooks.end(), addr, [](const auto& p, uintptr_t a){ return p.first < a; });
-            if (hook_iter != info.hooks.end() && hook_iter->first == addr) {
-                if (hook_iter->second == callback) info.hooks.erase(hook_iter);
+            while (hook_it != info.hooks.end() && hook_it->first < addr) {
+                new_hooks.push_back(*hook_it);
+                ++hook_it;
+            }
+
+            if (hook_it != info.hooks.end() && hook_it->first == addr) {
+                if (hook_it->second != callback) {
+                    new_hooks.push_back(*hook_it);
+                }
+                ++hook_it;
             } else {
-                info.hooks.insert(hook_iter, {addr, the_backup});
+                new_hooks.push_back({addr, the_backup});
             }
         }
+
+        while (hook_it != info.hooks.end()) {
+            new_hooks.push_back(*hook_it);
+            ++hook_it;
+        }
+        info.hooks = std::move(new_hooks);
 
         if (page_unprotected) {
             if (clear_start != 0) {
