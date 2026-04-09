@@ -232,9 +232,11 @@ public:
             sorted_reg.push_back(&reg);
         }
 
-        std::sort(sorted_reg.begin(), sorted_reg.end(), [](const HookRequest* a, const HookRequest* b) {
-            if (a->dev != b->dev) return a->dev < b->dev;
-            return a->inode < b->inode;
+        qsort(sorted_reg.data(), sorted_reg.size(), sizeof(const HookRequest*), [](const void* a, const void* b) -> int {
+            const auto* req_a = *static_cast<const HookRequest* const*>(a);
+            const auto* req_b = *static_cast<const HookRequest* const*>(b);
+            if (req_a->dev != req_b->dev) return (req_a->dev > req_b->dev) - (req_a->dev < req_b->dev);
+            return (req_a->inode > req_b->inode) - (req_a->inode < req_b->inode);
         });
 
         // Optimized using erase-remove idiom and binary search to achieve O(N log M) complexity
@@ -277,7 +279,11 @@ public:
         for (const auto &old_info : old.data) {
             if (old_info.backup) backups.push_back(old_info.backup);
         }
-        std::sort(backups.begin(), backups.end());
+        qsort(backups.data(), backups.size(), sizeof(uintptr_t), [](const void* a, const void* b) -> int {
+            auto val_a = *static_cast<const uintptr_t*>(a);
+            auto val_b = *static_cast<const uintptr_t*>(b);
+            return (val_a > val_b) - (val_a < val_b);
+        });
 
         if (!backups.empty()) {
             size_t b_idx = 0;
@@ -405,8 +411,10 @@ public:
     bool BatchPatchPLTEntries(HookInfo& info, std::vector<PendingPatch>& patches) {
         if (patches.empty()) return true;
 
-        std::sort(patches.begin(), patches.end(), [](const PendingPatch& a, const PendingPatch& b) {
-            return a.addr < b.addr;
+        qsort(patches.data(), patches.size(), sizeof(PendingPatch), [](const void* a, const void* b) -> int {
+            auto pa = static_cast<const PendingPatch*>(a)->addr;
+            auto pb = static_cast<const PendingPatch*>(b)->addr;
+            return (pa > pb) - (pa < pb);
         });
 
         const auto len = info.end - info.start;
@@ -550,9 +558,10 @@ public:
         bool res = true;
 
         // Sort by callback address for O(log N) binary search
-        std::sort(register_info.begin(), register_info.end(), 
-            [](const HookRequest& a, const HookRequest& b) {
-                return reinterpret_cast<uintptr_t>(a.callback) < reinterpret_cast<uintptr_t>(b.callback);
+        qsort(register_info.data(), register_info.size(), sizeof(HookRequest), [](const void* a, const void* b) -> int {
+            auto ca = reinterpret_cast<uintptr_t>(static_cast<const HookRequest*>(a)->callback);
+            auto cb = reinterpret_cast<uintptr_t>(static_cast<const HookRequest*>(b)->callback);
+            return (ca > cb) - (ca < cb);
         });
 
         std::vector<PendingPatch> patches;
@@ -619,10 +628,12 @@ public:
         std::vector<uintptr_t> possible_addr;
         possible_addr.reserve(4); // Pre-reserve capacity to minimize heap allocations
 
-        std::sort(register_info.begin(), register_info.end(), [](const HookRequest &a, const HookRequest &b) {
-            if (a.dev != b.dev) return a.dev < b.dev;
-            if (a.inode != b.inode) return a.inode < b.inode;
-            return a.offset_range.first < b.offset_range.first;
+        qsort(register_info.data(), register_info.size(), sizeof(HookRequest), [](const void* a, const void* b) -> int {
+            const auto* ra = static_cast<const HookRequest*>(a);
+            const auto* rb = static_cast<const HookRequest*>(b);
+            if (ra->dev != rb->dev) return (ra->dev > rb->dev) - (ra->dev < rb->dev);
+            if (ra->inode != rb->inode) return (ra->inode > rb->inode) - (ra->inode < rb->inode);
+            return (ra->offset_range.first > rb->offset_range.first) - (ra->offset_range.first < rb->offset_range.first);
         });
 
         HookInfo* last_matched_info = nullptr;
