@@ -153,15 +153,6 @@ Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
         case DT_RELASZ:
             rel_dyn_size_ = dynamic->d_un.d_val;
             break;
-        case DT_ANDROID_REL:
-        case DT_ANDROID_RELA: {
-            if (!SetByOffset(rel_android_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return;
-            break;
-        }
-        case DT_ANDROID_RELSZ:
-        case DT_ANDROID_RELASZ:
-            rel_android_size_ = dynamic->d_un.d_val;
-            break;
         case DT_HASH: {
             // ignore DT_HASH when ELF contains DT_GNU_HASH hash table
             if (bloom_) continue;
@@ -180,24 +171,11 @@ Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
             bloom_ = reinterpret_cast<decltype(bloom_)>(raw + 4);
             bucket_ = reinterpret_cast<decltype(bucket_)>(bloom_ + bloom_size_);
             chain_ = bucket_ + bucket_count_ - sym_offset_;
-            //            is_use_gnu_hash_ = true;
             break;
         }
         default:
             break;
         }
-    }
-
-    // check android rel/rela
-    if (0 != rel_android_) {
-        const auto *rel = reinterpret_cast<const char *>(rel_android_);
-        if (rel_android_size_ < 4 || rel[0] != 'A' || rel[1] != 'P' || rel[2] != 'S' ||
-            rel[3] != '2') {
-            return;
-        }
-
-        rel_android_ += 4;
-        rel_android_size_ -= 4;
     }
 
     valid_ = true;
@@ -298,5 +276,4 @@ void Elf::FindPltAddr(std::string_view name, std::vector<uintptr_t> &res) const 
 
     do_reloc(rel_plt_, rel_plt_size_, true);
     do_reloc(rel_dyn_, rel_dyn_size_, false);
-    do_reloc(rel_android_, rel_android_size_, false);
 }

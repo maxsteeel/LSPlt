@@ -1,22 +1,22 @@
 #include "include/lsplt.hpp"
 
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
-#include <unistd.h>
 #include <errno.h>
 #include <link.h>
-#include <sys/stat.h>
+#include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cinttypes>
+#include <cstring>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
-#include <algorithm>
-#include <cstring>
-#include <linux/limits.h>
 
 #include "elf_util.hpp"
 #include "logging.hpp"
@@ -24,10 +24,9 @@
 
 namespace {
 
-inline auto PageStart(uintptr_t addr) {
-    static const uintptr_t page_size = getpagesize();
-    return reinterpret_cast<char *>(addr / page_size * page_size);
-}
+inline uintptr_t SysPageSize() { static const uintptr_t size = getpagesize(); return size; }
+inline uintptr_t SysPageMask() { static const uintptr_t mask = ~(SysPageSize() - 1); return mask; }
+inline auto PageStart(uintptr_t addr) { return reinterpret_cast<char *>(addr & SysPageMask()); }
 
 /*
  * =======================================================================================
@@ -156,11 +155,11 @@ struct HookRequest {
 struct HookInfo : public lsplt::MapInfo {
     std::vector<std::pair<uintptr_t, uintptr_t>> hooks;
     uintptr_t backup;
-    std::unique_ptr<Elf> elf;
+    std::optional<Elf> elf;
     bool self;
 
     HookInfo(lsplt::MapInfo&& map, bool is_self)
-        : lsplt::MapInfo(std::move(map)), backup(0), elf(nullptr), self(is_self) {}
+        : lsplt::MapInfo(std::move(map)), backup(0), elf(std::nullopt), self(is_self) {}
 
     [[nodiscard]] bool Match(const HookRequest &info) const {
         return info.dev == dev && info.inode == inode && offset >= info.offset_range.first &&
@@ -471,9 +470,9 @@ public:
                 
                 if (page_start != current_page) {
                     if (page_unprotected) {
-                        mprotect(reinterpret_cast<void*>(current_page), getpagesize(), info.perms);
+                        mprotect(reinterpret_cast<void*>(current_page), SysPageSize(), info.perms);
                     }
-                    if (mprotect(reinterpret_cast<void*>(page_start), getpagesize(), info.perms | PROT_WRITE) == 0) {
+                    if (mprotect(reinterpret_cast<void*>(page_start), SysPageSize(), info.perms | PROT_WRITE) == 0) {
                         current_page = page_start;
                         page_unprotected = true;
                     } else {
@@ -502,7 +501,7 @@ public:
         }
 
         if (page_unprotected) {
-            mprotect(reinterpret_cast<void*>(current_page), getpagesize(), info.perms);
+            mprotect(reinterpret_cast<void*>(current_page), SysPageSize(), info.perms);
         }
 
         if (info.hooks.empty() && !info.self) {
@@ -647,7 +646,7 @@ public:
 
             if (last_matched_info) {
                 auto &info = *last_matched_info;
-                if (!info.elf) info.elf = std::make_unique<Elf>(info.start);
+                if (!info.elf) info.elf.emplace(info.start);
                 if (info.elf && info.elf->Valid()) {
                     LOGV("finding symbol %s", reg.symbol);
                     info.elf->FindPltAddr(reg.symbol, possible_addr);
@@ -766,11 +765,8 @@ static inline bool ParseDec(const char*& p, const char* end, T* val) {
     return parsed_any;
 }
 
-#ifndef PAGE_SIZE
-#define PAGE_SIZE 4096
-#endif
-#define PAGE_START(x) ((x) & ~(PAGE_SIZE - 1))
-#define PAGE_END(x) PAGE_START((x) + (PAGE_SIZE - 1))
+inline uintptr_t AlignPageStart(uintptr_t addr) { return addr & SysPageMask(); }
+inline uintptr_t AlignPageEnd(uintptr_t addr) { return AlignPageStart(addr + SysPageSize() - 1); }
 
 struct DlIterateData {
     std::vector<MapInfo> *info_vec;
@@ -778,6 +774,8 @@ struct DlIterateData {
     bool cached_success;
     ino_t cached_inode;
     dev_t cached_dev;
+    char exe_path[PATH_MAX];
+    bool exe_path_loaded;
 };
 
 static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t size, void *data) {
@@ -785,15 +783,17 @@ static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t 
     auto *info_vec = iter_data->info_vec;
 
     const char *name = info->dlpi_name;
-    char exe_path[PATH_MAX];
     if (!name || name[0] == '\0') {
-        ssize_t len = readlink("/proc/self/exe", exe_path, sizeof(exe_path) - 1);
-        if (len != -1) {
-            exe_path[len] = '\0';
-            name = exe_path;
-        } else {
-            name = "";
+        if (!iter_data->exe_path_loaded) {
+            ssize_t len = readlink("/proc/self/exe", iter_data->exe_path, sizeof(iter_data->exe_path) - 1);
+            if (len != -1) {
+                iter_data->exe_path[len] = '\0';
+            } else {
+                iter_data->exe_path[0] = '\0';
+            }
+            iter_data->exe_path_loaded = true;
         }
+        name = iter_data->exe_path;
     }
 
     struct stat st;
@@ -832,9 +832,9 @@ static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t 
     for (int i = 0; i < info->dlpi_phnum; i++) {
         const ElfW(Phdr) *phdr = &info->dlpi_phdr[i];
         if (phdr->p_type == PT_LOAD) {
-            uintptr_t start = PAGE_START(info->dlpi_addr + phdr->p_vaddr);
-            uintptr_t end = PAGE_END(info->dlpi_addr + phdr->p_vaddr + phdr->p_memsz);
-            uintptr_t offset = PAGE_START(phdr->p_offset);
+            uintptr_t start = AlignPageStart(info->dlpi_addr + phdr->p_vaddr);
+            uintptr_t end = AlignPageEnd(info->dlpi_addr + phdr->p_vaddr + phdr->p_memsz);
+            uintptr_t offset = AlignPageStart(phdr->p_offset);
 
             uint8_t perms = 0;
             if (phdr->p_flags & PF_R) perms |= PROT_READ;
@@ -929,6 +929,7 @@ static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_
         iter_data.cached_success = false;
         iter_data.cached_inode = 0;
         iter_data.cached_dev = 0;
+        iter_data.exe_path_loaded = false;
         dl_iterate_phdr(DlIterateCallback, &iter_data);
         return info;
     }
@@ -989,7 +990,9 @@ static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_
     static_assert(std::numeric_limits<uintptr_t>::min() == 0);
     static_assert(std::numeric_limits<uintptr_t>::max() == -1);
     HookRequest req{dev, inode, {std::numeric_limits<uintptr_t>::min(), std::numeric_limits<uintptr_t>::max()}, {0}, callback, backup};
-    strlcpy(req.symbol, symbol.data(), sizeof(req.symbol));
+    size_t copy_len = std::min(symbol.length(), sizeof(req.symbol) - 1);
+    std::memcpy(req.symbol, symbol.data(), copy_len);
+    req.symbol[copy_len] = '\0';
     g_pending_hooks.push_back(req);
 
     LOGV("RegisterHook %lu %s", req.inode, req.symbol);
@@ -1002,7 +1005,9 @@ static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_
 
     const std::unique_lock lock(g_hook_state_mutex);
     HookRequest req{dev, inode, {offset, offset + size}, {0}, callback, backup};
-    strlcpy(req.symbol, symbol.data(), sizeof(req.symbol));
+    size_t copy_len = std::min(symbol.length(), sizeof(req.symbol) - 1);
+    std::memcpy(req.symbol, symbol.data(), copy_len);
+    req.symbol[copy_len] = '\0';
     g_pending_hooks.push_back(req);
 
     LOGV("RegisterHook %lu %" PRIxPTR "-%" PRIxPTR " %s", req.inode, req.offset_range.first,

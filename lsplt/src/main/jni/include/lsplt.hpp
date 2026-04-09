@@ -1,6 +1,7 @@
 #pragma once
 
 #include <sys/types.h>
+#include <linux/limits.h>
 
 #include <string>
 #include <string_view>
@@ -34,7 +35,7 @@ struct MapInfo {
     /// \brief The inode number of the memory region.
     ino_t inode;
     /// \brief The path of the memory region.
-    char path[256];
+    char path[PATH_MAX];
 
     /// \brief Scans /proc/self/maps and returns a list of \ref MapInfo entries.
     /// This is useful to find out the inode of the library to hook.
