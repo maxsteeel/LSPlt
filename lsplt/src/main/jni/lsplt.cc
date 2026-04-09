@@ -915,18 +915,17 @@ static int DlIterateCallback(struct dl_phdr_info *info, [[maybe_unused]] size_t 
     return 0;
 }
 
-static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_info) {
-    uintptr_t map_start = 0, map_end = 0, map_off = 0;
-    uint64_t map_inode = 0;
-    uintptr_t major = 0, minor = 0;
-
-    if (!ParseHex(line_p, line_end, &map_start)) return false;
+static inline bool ParseMapAddresses(const char*& line_p, const char* line_end, MapInfo& map_info) {
+    if (!ParseHex(line_p, line_end, &map_info.start)) return false;
     if (line_p >= line_end || *line_p != '-') return false;
     line_p++;
 
-    if (!ParseHex(line_p, line_end, &map_end)) return false;
+    if (!ParseHex(line_p, line_end, &map_info.end)) return false;
     SkipSpace(line_p, line_end);
+    return true;
+}
 
+static inline bool ParseMapPermissions(const char*& line_p, const char* line_end, MapInfo& map_info) {
     bool read = false, write = false, exec = false, is_private = false;
     if (line_p < line_end) { read = (*line_p == 'r'); line_p++; } else return false;
     if (line_p < line_end) { write = (*line_p == 'w'); line_p++; } else return false;
@@ -935,7 +934,19 @@ static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_
     if (line_p < line_end && *line_p != ' ') line_p++;
     SkipSpace(line_p, line_end);
 
-    if (!ParseHex(line_p, line_end, &map_off)) return false;
+    map_info.perms = 0;
+    if (read) map_info.perms |= PROT_READ;
+    if (write) map_info.perms |= PROT_WRITE;
+    if (exec) map_info.perms |= PROT_EXEC;
+    map_info.is_private = is_private;
+    return true;
+}
+
+static inline bool ParseMapOffsetDevInode(const char*& line_p, const char* line_end, MapInfo& map_info) {
+    uintptr_t major = 0, minor = 0;
+    uint64_t map_inode = 0;
+
+    if (!ParseHex(line_p, line_end, &map_info.offset)) return false;
     SkipSpace(line_p, line_end);
 
     if (!ParseHex(line_p, line_end, &major)) return false;
@@ -948,19 +959,12 @@ static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_
     if (!ParseDec(line_p, line_end, &map_inode)) return false;
     SkipSpace(line_p, line_end);
 
-    uint8_t perms = 0;
-    if (read) perms |= PROT_READ;
-    if (write) perms |= PROT_WRITE;
-    if (exec) perms |= PROT_EXEC;
-
-    map_info.start = map_start;
-    map_info.end = map_end;
-    map_info.perms = perms;
-    map_info.is_private = is_private;
-    map_info.offset = map_off;
     map_info.dev = static_cast<dev_t>(makedev(major, minor));
     map_info.inode = static_cast<ino_t>(map_inode);
+    return true;
+}
 
+static inline void ParseMapPath(const char* line_p, const char* line_end, MapInfo& map_info) {
     size_t path_len = line_end - line_p;
     if (path_len >= sizeof(map_info.path)) {
         map_info.path[0] = '\0';
@@ -970,7 +974,13 @@ static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_
         }
         map_info.path[path_len] = '\0';
     }
+}
 
+static bool ParseMapLine(const char* line_p, const char* line_end, MapInfo& map_info) {
+    if (!ParseMapAddresses(line_p, line_end, map_info)) return false;
+    if (!ParseMapPermissions(line_p, line_end, map_info)) return false;
+    if (!ParseMapOffsetDevInode(line_p, line_end, map_info)) return false;
+    ParseMapPath(line_p, line_end, map_info);
     return true;
 }
 
