@@ -1,342 +1,161 @@
 #include "elf_util.hpp"
-
 #include <cstring>
-#include <type_traits>
-#include <vector>
-#include <tuple>
 #include <algorithm>
 
-#if defined(__arm__)
-#define ELF_R_GENERIC_JUMP_SLOT R_ARM_JUMP_SLOT  //.rel.plt
-#define ELF_R_GENERIC_GLOB_DAT R_ARM_GLOB_DAT    //.rel.dyn
-#define ELF_R_GENERIC_ABS R_ARM_ABS32            //.rel.dyn
-#elif defined(__aarch64__)
-#define ELF_R_GENERIC_JUMP_SLOT R_AARCH64_JUMP_SLOT
-#define ELF_R_GENERIC_GLOB_DAT R_AARCH64_GLOB_DAT
-#define ELF_R_GENERIC_ABS R_AARCH64_ABS64
+#if defined(__aarch64__)
+#define R_JUMP_SLOT R_AARCH64_JUMP_SLOT
+#define R_GLOB_DAT  R_AARCH64_GLOB_DAT
+#define R_ABS       R_AARCH64_ABS64
+#elif defined(__arm__)
+#define R_JUMP_SLOT R_ARM_JUMP_SLOT
+#define R_GLOB_DAT  R_ARM_GLOB_DAT
+#define R_ABS       R_ARM_ABS32
 #elif defined(__i386__)
-#define ELF_R_GENERIC_JUMP_SLOT R_386_JMP_SLOT
-#define ELF_R_GENERIC_GLOB_DAT R_386_GLOB_DAT
-#define ELF_R_GENERIC_ABS R_386_32
+#define R_JUMP_SLOT R_386_JMP_SLOT
+#define R_GLOB_DAT  R_386_GLOB_DAT
+#define R_ABS       R_386_32
 #elif defined(__x86_64__)
-#define ELF_R_GENERIC_JUMP_SLOT R_X86_64_JUMP_SLOT
-#define ELF_R_GENERIC_GLOB_DAT R_X86_64_GLOB_DAT
-#define ELF_R_GENERIC_ABS R_X86_64_64
+#define R_JUMP_SLOT R_X86_64_JUMP_SLOT
+#define R_GLOB_DAT  R_X86_64_GLOB_DAT
+#define R_ABS       R_X86_64_64
 #elif defined(__riscv)
-#define ELF_R_GENERIC_JUMP_SLOT R_RISCV_JUMP_SLOT
-#define ELF_R_GENERIC_GLOB_DAT R_RISCV_64
-#define ELF_R_GENERIC_ABS R_RISCV_64
+#define R_JUMP_SLOT R_RISCV_JUMP_SLOT
+#define R_GLOB_DAT  R_RISCV_64
+#define R_ABS       R_RISCV_64
 #endif
 
 #if defined(__LP64__)
-#define ELF_R_SYM(info) ELF64_R_SYM(info)
-#define ELF_R_TYPE(info) ELF64_R_TYPE(info)
+#define ELF_R_SYM(i)  ELF64_R_SYM(i)
+#define ELF_R_TYPE(i) ELF64_R_TYPE(i)
 #else
-#define ELF_R_SYM(info) ELF32_R_SYM(info)
-#define ELF_R_TYPE(info) ELF32_R_TYPE(info)
+#define ELF_R_SYM(i)  ELF32_R_SYM(i)
+#define ELF_R_TYPE(i) ELF32_R_TYPE(i)
 #endif
 
 namespace {
-template <typename T>
-inline constexpr auto OffsetOf(ElfW(Ehdr) * head, ElfW(Off) off) {
-    return reinterpret_cast<std::conditional_t<std::is_pointer_v<T>, T, T *>>(
-        reinterpret_cast<uintptr_t>(head) + off);
-}
-
-template <typename T>
-inline constexpr auto SetByOffset(T &ptr, ElfW(Addr) base, ElfW(Addr) bias, ElfW(Addr) off) {
-    if (auto val = bias + off; val > base) {
-        ptr = reinterpret_cast<T>(val);
-        return true;
+    inline bool MatchSym(const SymName& n, const char* s) {
+        return s[0] == n.name[0] && strncmp(n.name.data(), s, n.name.size()) == 0 && s[n.name.size()] == '\0';
     }
-    ptr = 0;
-    return false;
-}
-
-inline bool MatchSymName(const SymName& name, const char* sym_name) {
-    return sym_name[0] == name.name[0] &&
-           strncmp(name.name.data(), sym_name, name.name.size()) == 0 &&
-           sym_name[name.name.size()] == '\0';
-}
-
-}  // namespace
-
-bool Elf::ParseHeader() {
-    // check magic
-    if (0 != memcmp(header_->e_ident, ELFMAG, SELFMAG)) return false;
-
-        // check class (64/32)
-#if defined(__LP64__)
-    if (ELFCLASS64 != header_->e_ident[EI_CLASS]) return false;
-#else
-    if (ELFCLASS32 != header_->e_ident[EI_CLASS]) return false;
-#endif
-
-    // check endian (little/big)
-    if (ELFDATA2LSB != header_->e_ident[EI_DATA]) return false;
-
-    // check version
-    if (EV_CURRENT != header_->e_ident[EI_VERSION]) return false;
-
-    // check type
-    if (ET_EXEC != header_->e_type && ET_DYN != header_->e_type) return false;
-
-        // check machine
-#if defined(__arm__)
-    if (EM_ARM != header_->e_machine) return false;
-#elif defined(__aarch64__)
-    if (EM_AARCH64 != header_->e_machine) return false;
-#elif defined(__i386__)
-    if (EM_386 != header_->e_machine) return false;
-#elif defined(__x86_64__)
-    if (EM_X86_64 != header_->e_machine) return false;
-#elif defined(__riscv)
-    if (EM_RISCV != header_->e_machine) return false;
-#else
-    return false;
-#endif
-
-    // check version
-    if (EV_CURRENT != header_->e_version) return false;
-
-    return true;
-}
-
-bool Elf::ParseDynamicTable() {
-    program_header_ = OffsetOf<decltype(program_header_)>(header_, header_->e_phoff);
-
-    auto ph_off = reinterpret_cast<uintptr_t>(program_header_);
-    for (int i = 0; i < header_->e_phnum; i++, ph_off += header_->e_phentsize) {
-        auto *program_header = reinterpret_cast<ElfW(Phdr) *>(ph_off);
-        if (program_header->p_type == PT_LOAD && program_header->p_offset == 0) {
-            if (base_addr_ >= program_header->p_vaddr) {
-                bias_addr_ = base_addr_ - program_header->p_vaddr;
-            }
-        } else if (program_header->p_type == PT_DYNAMIC) {
-            dynamic_ = reinterpret_cast<decltype(dynamic_)>(program_header->p_vaddr);
-            dynamic_size_ = program_header->p_memsz;
-        }
-    }
-    if (!dynamic_ || !bias_addr_) return false;
-    dynamic_ =
-        reinterpret_cast<decltype(dynamic_)>(bias_addr_ + reinterpret_cast<uintptr_t>(dynamic_));
-
-    for (auto *dynamic = dynamic_, *dynamic_end = dynamic_ + (dynamic_size_ / sizeof(dynamic[0]));
-         dynamic < dynamic_end; ++dynamic) {
-        switch (dynamic->d_tag) {
-        case DT_NULL:
-            // the end of the dynamic-section
-            dynamic = dynamic_end;
-            break;
-        case DT_STRTAB: {
-            if (!SetByOffset(dyn_str_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return false;
-            break;
-        }
-        case DT_SYMTAB: {
-            if (!SetByOffset(dyn_sym_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return false;
-            break;
-        }
-        case DT_PLTREL:
-            // use rel or rela?
-            is_use_rela_ = dynamic->d_un.d_val == DT_RELA;
-            break;
-        case DT_JMPREL: {
-            if (!SetByOffset(rel_plt_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return false;
-            break;
-        }
-        case DT_PLTRELSZ:
-            rel_plt_size_ = dynamic->d_un.d_val;
-            break;
-        case DT_REL:
-        case DT_RELA: {
-            if (!SetByOffset(rel_dyn_, base_addr_, bias_addr_, dynamic->d_un.d_ptr)) return false;
-            break;
-        }
-        case DT_RELSZ:
-        case DT_RELASZ:
-            rel_dyn_size_ = dynamic->d_un.d_val;
-            break;
-        case DT_HASH: {
-            // ignore DT_HASH when ELF contains DT_GNU_HASH hash table
-            if (bloom_) continue;
-            auto *raw = reinterpret_cast<ElfW(Word) *>(bias_addr_ + dynamic->d_un.d_ptr);
-            bucket_count_ = raw[0];
-            bucket_ = raw + 2;
-            chain_ = bucket_ + bucket_count_;
-            break;
-        }
-        case DT_GNU_HASH: {
-            auto *raw = reinterpret_cast<ElfW(Word) *>(bias_addr_ + dynamic->d_un.d_ptr);
-            bucket_count_ = raw[0];
-            sym_offset_ = raw[1];
-            bloom_size_ = raw[2];
-            bloom_shift_ = raw[3];
-            bloom_ = reinterpret_cast<decltype(bloom_)>(raw + 4);
-            bucket_ = reinterpret_cast<decltype(bucket_)>(bloom_ + bloom_size_);
-            chain_ = bucket_ + bucket_count_ - sym_offset_;
-            break;
-        }
-        default:
-            break;
-        }
-    }
-
-    return true;
 }
 
 Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
-    header_ = reinterpret_cast<decltype(header_)>(base_addr);
-    if (!ParseHeader()) return;
-    if (!ParseDynamicTable()) return;
+    header_ = reinterpret_cast<ElfW(Ehdr)*>(base_addr);
+    if (ParseHeader() && ParseDynamicTable()) {
+        valid_ = true;
+        BuildRelocIndex();
+    }
+}
 
-    valid_ = true;
-    BuildRelocIndex();
+bool Elf::ParseHeader() {
+    if (memcmp(header_->e_ident, ELFMAG, SELFMAG) != 0) return false;
+    if (header_->e_type != ET_EXEC && header_->e_type != ET_DYN) return false;
+    
+    uint16_t m = header_->e_machine;
+#if defined(__aarch64__)
+    return m == EM_AARCH64;
+#elif defined(__arm__)
+    return m == EM_ARM;
+#elif defined(__i386__)
+    return m == EM_386;
+#elif defined(__x86_64__)
+    return m == EM_X86_64;
+#elif defined(__riscv)
+    return m == EM_RISCV;
+#else
+    return false;
+#endif
+}
+
+bool Elf::ParseDynamicTable() {
+    auto* phdr = reinterpret_cast<ElfW(Phdr)*>(base_addr_ + header_->e_phoff);
+    for (int i = 0; i < header_->e_phnum; i++) {
+        if (phdr[i].p_type == PT_LOAD && phdr[i].p_offset == 0) bias_addr_ = base_addr_ - phdr[i].p_vaddr;
+        else if (phdr[i].p_type == PT_DYNAMIC) { dynamic_ = reinterpret_cast<ElfW(Dyn)*>(phdr[i].p_vaddr); dynamic_size_ = phdr[i].p_memsz; }
+    }
+    if (!dynamic_ || !bias_addr_) return false;
+    dynamic_ = reinterpret_cast<ElfW(Dyn)*>(bias_addr_ + reinterpret_cast<uintptr_t>(dynamic_));
+
+    for (auto* d = dynamic_; d->d_tag != DT_NULL; ++d) {
+        uintptr_t val = bias_addr_ + d->d_un.d_ptr;
+        switch (d->d_tag) {
+            case DT_STRTAB: dyn_str_ = reinterpret_cast<const char*>(val); break;
+            case DT_SYMTAB: dyn_sym_ = reinterpret_cast<ElfW(Sym)*>(val); break;
+            case DT_PLTREL: is_use_rela_ = (d->d_un.d_val == DT_RELA); break;
+            case DT_JMPREL: rel_plt_ = val; break;
+            case DT_PLTRELSZ: rel_plt_size_ = d->d_un.d_val; break;
+            case DT_REL: case DT_RELA: rel_dyn_ = val; break;
+            case DT_RELSZ: case DT_RELASZ: rel_dyn_size_ = d->d_un.d_val; break;
+            case DT_HASH: if (!bloom_) { auto* r = reinterpret_cast<ElfW(Word)*>(val); bucket_count_ = r[0]; bucket_ = r + 2; chain_ = bucket_ + bucket_count_; } break;
+            case DT_GNU_HASH: { auto* r = reinterpret_cast<ElfW(Word)*>(val); bucket_count_ = r[0]; sym_offset_ = r[1]; bloom_size_ = r[2]; bloom_shift_ = r[3];
+                bloom_ = reinterpret_cast<ElfW(Addr)*>(r + 4); bucket_ = reinterpret_cast<uint32_t*>(bloom_ + bloom_size_); chain_ = bucket_ + bucket_count_ - sym_offset_; } break;
+        }
+    }
+    return dyn_str_ && dyn_sym_;
 }
 
 template <typename T>
 void Elf::ProcessReloc(ElfW(Addr) begin, ElfW(Word) size, bool is_plt) {
-    const auto *rel_end = reinterpret_cast<const T *>(begin + size);
-    for (const auto *rel = reinterpret_cast<const T *>(begin); rel < rel_end; ++rel) {
-        auto r_info = rel->r_info;
-        auto r_offset = rel->r_offset;
-        auto r_sym = ELF_R_SYM(r_info);
-        auto r_type = ELF_R_TYPE(r_info);
-
-        if (is_plt && r_type != ELF_R_GENERIC_JUMP_SLOT) continue;
-        if (!is_plt && r_type != ELF_R_GENERIC_ABS && r_type != ELF_R_GENERIC_GLOB_DAT) continue;
-
-        auto addr = bias_addr_ + r_offset;
-        if (addr > base_addr_) {
-            if (is_plt) {
-                plt_relocs_.push_back({(uint32_t)r_sym, addr});
-            } else {
-                dyn_relocs_.push_back({(uint32_t)r_sym, addr});
-            }
+    auto* end = reinterpret_cast<const T*>(begin + size);
+    for (auto* r = reinterpret_cast<const T*>(begin); r < end; ++r) {
+        auto type = ELF_R_TYPE(r->r_info);
+        if (is_plt ? (type == R_JUMP_SLOT) : (type == R_ABS || type == R_GLOB_DAT)) {
+            ElfW(Addr) addr = bias_addr_ + r->r_offset;
+            if (addr > base_addr_) (is_plt ? plt_relocs_ : dyn_relocs_).push_back({(uint32_t)ELF_R_SYM(r->r_info), addr});
         }
     }
 }
 
 void Elf::DoReloc(ElfW(Addr) rel, ElfW(Word) size, bool is_plt) {
     if (!rel) return;
-    if (is_use_rela_) {
-        ProcessReloc<ElfW(Rela)>(rel, size, is_plt);
-    } else {
-        ProcessReloc<ElfW(Rel)>(rel, size, is_plt);
-    }
-}
-
-int Elf::CmpReloc(const void* a, const void* b) {
-    auto sym_a = static_cast<const Reloc*>(a)->sym;
-    auto sym_b = static_cast<const Reloc*>(b)->sym;
-    return (sym_a > sym_b) - (sym_a < sym_b);
+    if (is_use_rela_) ProcessReloc<ElfW(Rela)>(rel, size, is_plt);
+    else ProcessReloc<ElfW(Rel)>(rel, size, is_plt);
 }
 
 void Elf::BuildRelocIndex() {
-    size_t rel_size = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
-    if (rel_size > 0) {
-        plt_relocs_.reserve(rel_plt_size_ / rel_size);
-        dyn_relocs_.reserve(rel_dyn_size_ / rel_size);
-    }
-
-    DoReloc(rel_plt_, rel_plt_size_, true);
-    DoReloc(rel_dyn_, rel_dyn_size_, false);
-
-    if (!plt_relocs_.empty()) {
-        qsort(plt_relocs_.data(), plt_relocs_.size(), sizeof(Reloc), CmpReloc);
-    }
-    if (!dyn_relocs_.empty()) {
-        qsort(dyn_relocs_.data(), dyn_relocs_.size(), sizeof(Reloc), CmpReloc);
-    }
+    size_t r_sz = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+    plt_relocs_.reserve(rel_plt_size_ / r_sz); dyn_relocs_.reserve(rel_dyn_size_ / r_sz);
+    DoReloc(rel_plt_, rel_plt_size_, true); DoReloc(rel_dyn_, rel_dyn_size_, false);
+    auto cmp = [](const void* a, const void* b) { return (int)(((Reloc*)a)->sym - ((Reloc*)b)->sym); };
+    if (!plt_relocs_.empty()) qsort(plt_relocs_.data(), plt_relocs_.size(), sizeof(Reloc), cmp);
+    if (!dyn_relocs_.empty()) qsort(dyn_relocs_.data(), dyn_relocs_.size(), sizeof(Reloc), cmp);
 }
 
 uint32_t Elf::GnuLookup(const SymName& name) const {
-    static constexpr auto kBloomMaskBits = sizeof(ElfW(Addr)) * 8;
-
-    if (!bucket_ || !bloom_) return 0;
-
-    uint32_t hash = name.gnu_hash;
-    auto bloom_word = bloom_[(hash / kBloomMaskBits) % bloom_size_];
-    uintptr_t mask = 0 | uintptr_t{1} << (hash % kBloomMaskBits) |
-                     uintptr_t{1} << ((hash >> bloom_shift_) % kBloomMaskBits);
-    if ((mask & bloom_word) == mask) {
-        auto idx = bucket_[hash % bucket_count_];
-        if (idx >= sym_offset_) {
-            if (name.name.empty()) return 0;
-            const char *strings = dyn_str_;
-            do {
-                auto *sym = dyn_sym_ + idx;
-                const char *sym_name = strings + sym->st_name;
-                if (((chain_[idx] ^ hash) >> 1) == 0 && MatchSymName(name, sym_name)) {
-                    return idx;
-                }
-            } while ((chain_[idx++] & 1) == 0);
-        }
+    if (!bloom_) return 0;
+    static constexpr auto bbits = sizeof(ElfW(Addr)) * 8;
+    auto word = bloom_[(name.gnu_hash / bbits) % bloom_size_];
+    auto mask = uintptr_t(1) << (name.gnu_hash % bbits) | uintptr_t(1) << ((name.gnu_hash >> bloom_shift_) % bbits);
+    if ((word & mask) != mask) return 0;
+    for (uint32_t i = bucket_[name.gnu_hash % bucket_count_]; i >= sym_offset_ && i != 0; ++i) {
+        if (((chain_[i] ^ name.gnu_hash) >> 1) == 0 && MatchSym(name, dyn_str_ + dyn_sym_[i].st_name)) return i;
+        if (chain_[i] & 1) break;
     }
     return 0;
 }
 
 uint32_t Elf::ElfLookup(const SymName& name) const {
     if (!bucket_ || bloom_) return 0;
-
-    uint32_t hash = name.elf_hash;
-
-    if (name.name.empty()) return 0;
-
-    const char *strings = dyn_str_;
-
-    for (auto idx = bucket_[hash % bucket_count_]; idx != 0; idx = chain_[idx]) {
-        auto *sym = dyn_sym_ + idx;
-        const char *sym_name = strings + sym->st_name;
-        if (MatchSymName(name, sym_name)) {
-            return idx;
-        }
-    }
+    for (auto i = bucket_[name.elf_hash % bucket_count_]; i != 0; i = chain_[i])
+        if (MatchSym(name, dyn_str_ + dyn_sym_[i].st_name)) return i;
     return 0;
 }
 
 uint32_t Elf::LinearLookup(const SymName& name) const {
-    if (!dyn_sym_ || !sym_offset_ || name.name.empty()) return 0;
-    for (uint32_t idx = 0; idx < sym_offset_; idx++) {
-        auto *sym = dyn_sym_ + idx;
-        const char *sym_name = dyn_str_ + sym->st_name;
-        if (MatchSymName(name, sym_name)) {
-            return idx;
-        }
-    }
+    for (uint32_t i = 0; i < sym_offset_; i++)
+        if (MatchSym(name, dyn_str_ + dyn_sym_[i].st_name)) return i;
     return 0;
 }
 
-size_t Elf::FindLowerBound(const std::vector<Reloc>& relocs, uint32_t target_sym) const {
-    size_t low = 0, high = relocs.size();
-    while (low < high) {
-        size_t mid = low + (high - low) / 2;
-        if (relocs[mid].sym < target_sym) {
-            low = mid + 1;
-        } else {
-            high = mid;
-        }
-    }
-    return low;
-}
-
 void Elf::FindPltAddr(std::string_view name, std::vector<uintptr_t> &res) const {
-    res.clear();
-
-    SymName sym_name(name);
-    uint32_t idx = GnuLookup(sym_name);
-    if (!idx) idx = ElfLookup(sym_name);
-    if (!idx) idx = LinearLookup(sym_name);
+    res.clear(); SymName sn(name);
+    uint32_t idx = GnuLookup(sn);
+    if (!idx) idx = ElfLookup(sn);
+    if (!idx) idx = LinearLookup(sn);
     if (!idx) return;
 
-    size_t plt_idx = FindLowerBound(plt_relocs_, idx);
-    while (plt_idx < plt_relocs_.size() && plt_relocs_[plt_idx].sym == idx) {
-        res.push_back(plt_relocs_[plt_idx].addr);
-        break; // original logic breaks on first is_plt
-    }
-
-    size_t dyn_idx = FindLowerBound(dyn_relocs_, idx);
-    while (dyn_idx < dyn_relocs_.size() && dyn_relocs_[dyn_idx].sym == idx) {
-        res.push_back(dyn_relocs_[dyn_idx].addr);
-        ++dyn_idx;
-    }
+    auto find = [&](const std::vector<Reloc>& v, bool plt) {
+        auto it = std::lower_bound(v.begin(), v.end(), idx, [](const Reloc& r, uint32_t id) { return r.sym < id; });
+        for (; it != v.end() && it->sym == idx; ++it) { res.push_back(it->addr); if (plt) break; }
+    };
+    find(plt_relocs_, true); find(dyn_relocs_, false);
 }
