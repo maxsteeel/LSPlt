@@ -97,9 +97,15 @@ public:
         std::vector<uintptr_t> backups; for (const auto &i : old.data) if (i.backup) backups.push_back(i.backup);
         if (!backups.empty()) {
             ::sort(backups.begin(), backups.end(), [](uintptr_t a, uintptr_t b) { return a < b; });
-            data.erase(std::remove_if(data.begin(), data.end(), [&](const auto& hi) { 
-                return std::binary_search(backups.begin(), backups.end(), hi.start); 
-            }), data.end());
+            auto dest = data.begin(); auto it = data.begin(); auto end = data.end();
+            auto backup_it = backups.begin(); auto backup_end = backups.end();
+            while (it != end && backup_it != backup_end) {
+                if (it->start < *backup_it) *dest++ = std::move(*it++);
+                else if (it->start > *backup_it) ++backup_it;
+                else ++it;
+            }
+            while (it != end) *dest++ = std::move(*it++);
+            data.erase(dest, end);
         }
         std::vector<HookInfo> merged; merged.reserve(data.size() + old.data.size());
         auto it1 = data.begin(), it2 = old.data.begin();
