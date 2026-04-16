@@ -115,9 +115,9 @@ void Elf::BuildRelocIndex() {
     size_t r_sz = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
     plt_relocs_.reserve(rel_plt_size_ / r_sz); dyn_relocs_.reserve(rel_dyn_size_ / r_sz);
     DoReloc(rel_plt_, rel_plt_size_, true); DoReloc(rel_dyn_, rel_dyn_size_, false);
-    auto cmp = [](const void* a, const void* b) { return (int)(((Reloc*)a)->sym - ((Reloc*)b)->sym); };
-    if (!plt_relocs_.empty()) qsort(plt_relocs_.data(), plt_relocs_.size(), sizeof(Reloc), cmp);
-    if (!dyn_relocs_.empty()) qsort(dyn_relocs_.data(), dyn_relocs_.size(), sizeof(Reloc), cmp);
+    auto cmp = [](const auto& a, const auto& b) { return a.sym < b.sym; };
+    if (!plt_relocs_.empty()) ::sort(plt_relocs_.begin(), plt_relocs_.end(), cmp);
+    if (!dyn_relocs_.empty()) ::sort(dyn_relocs_.begin(), dyn_relocs_.end(), cmp);
 }
 
 uint32_t Elf::GnuLookup(const SymName& name) const {

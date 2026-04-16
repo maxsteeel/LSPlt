@@ -74,10 +74,9 @@ public:
         if (register_info.empty()) { data.clear(); return; }
         static std::vector<const HookRequest*> sorted; sorted.clear(); sorted.reserve(register_info.size());
         for (const auto& reg : register_info) sorted.push_back(&reg);
-        qsort(sorted.data(), sorted.size(), sizeof(HookRequest*), [](const void* a, const void* b) -> int {
-            auto ra = *(const HookRequest**)a, rb = *(const HookRequest**)b;
-            if (ra->dev != rb->dev) return (ra->dev > rb->dev) - (ra->dev < rb->dev);
-            return (ra->inode > rb->inode) - (ra->inode < rb->inode);
+        ::sort(sorted.begin(), sorted.end(), [](const HookRequest* a, const HookRequest* b) {
+            if (a->dev != b->dev) return a->dev < b->dev;
+            return a->inode < b->inode;
         });
         auto it = std::remove_if(data.begin(), data.end(), [&](const auto &info) {
             size_t low = 0, high = sorted.size();
@@ -97,10 +96,7 @@ public:
         if (old.data.empty()) return;
         std::vector<uintptr_t> backups; for (const auto &i : old.data) if (i.backup) backups.push_back(i.backup);
         if (!backups.empty()) {
-            qsort(backups.data(), backups.size(), sizeof(uintptr_t), [](const void* a, const void* b) { 
-                uintptr_t va = *(uintptr_t*)a, vb = *(uintptr_t*)b;
-                return (va > vb) - (va < vb);
-            });
+            ::sort(backups.begin(), backups.end(), [](uintptr_t a, uintptr_t b) { return a < b; });
             data.erase(std::remove_if(data.begin(), data.end(), [&](const auto& hi) { 
                 return std::binary_search(backups.begin(), backups.end(), hi.start); 
             }), data.end());
@@ -119,10 +115,7 @@ public:
 
     bool BatchPatchPLTEntries(HookInfo& info, std::vector<PendingPatch>& patches) {
         if (patches.empty()) return true;
-        qsort(patches.data(), patches.size(), sizeof(PendingPatch), [](const void* a, const void* b) { 
-            uintptr_t va = ((PendingPatch*)a)->addr, vb = ((PendingPatch*)b)->addr;
-            return (va > vb) - (va < vb);
-        });
+        ::sort(patches.begin(), patches.end(), [](const auto& a, const auto& b) { return a.addr < b.addr; });
         const auto len = info.end - info.start;
         if (!info.backup && !info.self) {
             void *bkp = lsplt::sys::mmap(nullptr, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -179,10 +172,8 @@ public:
 
     bool RestoreFunction(std::vector<HookRequest> &reg_info) {
         if (reg_info.empty()) return true;
-        qsort(reg_info.data(), reg_info.size(), sizeof(HookRequest), [](const void* a, const void* b) { 
-            uintptr_t ca = (uintptr_t)((const HookRequest*)a)->callback;
-            uintptr_t cb = (uintptr_t)((const HookRequest*)b)->callback;
-            return (ca > cb) - (ca < cb);
+        ::sort(reg_info.begin(), reg_info.end(), [](const auto& a, const auto& b) { 
+            return reinterpret_cast<uintptr_t>(a.callback) < reinterpret_cast<uintptr_t>(b.callback);
         });
         std::vector<PendingPatch> patches; bool res = true;
         for (auto it = data.rbegin(); it != data.rend(); ++it) {
@@ -211,11 +202,10 @@ public:
 
     bool ProcessRequest(std::vector<HookRequest> &reg_info) {
         bool res = true; std::vector<uintptr_t> p_addr; p_addr.reserve(4);
-        qsort(reg_info.data(), reg_info.size(), sizeof(HookRequest), [](const void* a, const void* b) -> int {
-            auto ra = (const HookRequest*)a, rb = (const HookRequest*)b;
-            if (ra->dev != rb->dev) return (ra->dev > rb->dev) - (ra->dev < rb->dev);
-            if (ra->inode != rb->inode) return (ra->inode > rb->inode) - (ra->inode < rb->inode);
-            return (ra->offset_range.first > rb->offset_range.first) - (ra->offset_range.first < rb->offset_range.first);
+        ::sort(reg_info.begin(), reg_info.end(), [](const auto& a, const auto& b) {
+            if (a.dev != b.dev) return a.dev < b.dev;
+            if (a.inode != b.inode) return a.inode < b.inode;
+            return a.offset_range.first < b.offset_range.first;
         });
         HookInfo* last = nullptr; static std::vector<std::vector<PendingPatch>> grouped;
         if (grouped.size() < data.size()) grouped.resize(data.size());
