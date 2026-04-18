@@ -7,15 +7,21 @@
 struct SymName {
     std::string_view name;
     uint32_t gnu_hash = 5381;
-    uint32_t elf_hash = 0;
 
     explicit SymName(std::string_view n) : name(n) {
         for (unsigned char chr : n) {
             gnu_hash = (gnu_hash << 5) + gnu_hash + chr;
+        }
+    }
+
+    uint32_t GetElfHash() const {
+        uint32_t elf_hash = 0;
+        for (unsigned char chr : name) {
             elf_hash = (elf_hash << 4) + chr;
             uint32_t tmp = elf_hash & 0xf0000000;
             if (tmp) elf_hash ^= tmp | (tmp >> 24);
         }
+        return elf_hash;
     }
 };
 

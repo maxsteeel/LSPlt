@@ -135,7 +135,7 @@ uint32_t Elf::GnuLookup(const SymName& name) const {
 
 uint32_t Elf::ElfLookup(const SymName& name) const {
     if (!bucket_ || bloom_) return 0;
-    for (auto i = bucket_[name.elf_hash % bucket_count_]; i != 0; i = chain_[i])
+    for (auto i = bucket_[name.GetElfHash() % bucket_count_]; i != 0; i = chain_[i])
         if (MatchSym(name, dyn_str_ + dyn_sym_[i].st_name)) return i;
     return 0;
 }
