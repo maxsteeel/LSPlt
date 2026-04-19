@@ -263,6 +263,16 @@ public:
             info.backup = (uintptr_t)bkp;
         }
         uintptr_t cur_pg = 0, clr_s = 0, clr_e = 0; bool pg_unprot = false, res = true;
+
+        auto restore_page_prot = [&]() {
+            if (pg_unprot) {
+                if (clr_s) {
+                    __builtin___clear_cache(reinterpret_cast<char*>(clr_s), reinterpret_cast<char*>(clr_e));
+                }
+                lsplt::sys::mprotect(reinterpret_cast<void*>(cur_pg), lsplt::sys::SysPageSize(), info.perms);
+            }
+        };
+
         info.hooks.reserve(info.hooks.size + patches.size);
         for (size_t i = 0; i < patches.size; i++) {
             const auto& p = patches.data[i];
@@ -271,14 +281,28 @@ public:
             if (*t_addr != p.callback) {
                 uintptr_t pg_s = (uintptr_t)PageStart(p.addr);
                 if (pg_s != cur_pg) {
-                    if (pg_unprot) { if (clr_s) __builtin___clear_cache((char*)clr_s, (char*)clr_e); lsplt::sys::mprotect((void*)cur_pg, lsplt::sys::SysPageSize(), info.perms); }
-                    if (lsplt::sys::mprotect((void*)pg_s, lsplt::sys::SysPageSize(), info.perms | PROT_WRITE) == 0) { cur_pg = pg_s; pg_unprot = true; clr_s = clr_e = 0; }
-                    else { res = false; continue; }
+                    restore_page_prot();
+                    if (lsplt::sys::mprotect((void*)pg_s, lsplt::sys::SysPageSize(), info.perms | PROT_WRITE) == 0) {
+                        cur_pg = pg_s;
+                        pg_unprot = true;
+                        clr_s = clr_e = 0;
+                    } else {
+                        res = false;
+                        continue;
+                    }
                 }
                 if (pg_unprot) {
-                    *t_addr = p.callback; if (p.backup) *p.backup = t_bkp;
-                    if (!clr_s) { clr_s = p.addr; clr_e = p.addr + sizeof(uintptr_t); }
-                    else { clr_s = MIN_VAL(clr_s, p.addr); clr_e = MAX_VAL(clr_e, p.addr + sizeof(uintptr_t)); }
+                    *t_addr = p.callback;
+                    if (p.backup) {
+                        *p.backup = t_bkp;
+                    }
+                    if (!clr_s) {
+                        clr_s = p.addr;
+                        clr_e = p.addr + sizeof(uintptr_t);
+                    } else {
+                        clr_s = MIN_VAL(clr_s, p.addr);
+                        clr_e = MAX_VAL(clr_e, p.addr + sizeof(uintptr_t));
+                    }
                 }
             }
             size_t idx = ::lower_bound(info.hooks.data, info.hooks.size, p.addr, [](const ActiveHook& h, uintptr_t a) { return h.addr < a; });
@@ -288,7 +312,7 @@ public:
                 info.hooks.insert(idx, {p.addr, t_bkp});
             }
         }
-        if (pg_unprot) { if (clr_s) __builtin___clear_cache((char*)clr_s, (char*)clr_e); lsplt::sys::mprotect((void*)cur_pg, lsplt::sys::SysPageSize(), info.perms); }
+        restore_page_prot();
         if (info.hooks.empty() && !info.self) { if (lsplt::sys::mremap((void*)info.backup, len, len, MREMAP_FIXED | MREMAP_MAYMOVE, (void*)info.start) != MAP_FAILED) info.backup = 0; else return false; }
         return res;
     }
