@@ -1,6 +1,4 @@
 #include "elf_util.hpp"
-#include <cstring>
-#include <algorithm>
 
 #if defined(__aarch64__)
 #define R_JUMP_SLOT R_AARCH64_JUMP_SLOT
@@ -33,8 +31,24 @@
 #endif
 
 namespace {
-    inline bool MatchSym(const SymName& n, const char* s) {
-        return s[0] == n.name[0] && strncmp(n.name.data(), s, n.name.size()) == 0 && s[n.name.size()] == '\0';
+    template<typename T>
+    static inline const T* lower_bound(const T* first, const T* last, uint32_t val) {
+        size_t count = last - first;
+        while (count > 0) {
+            size_t step = count / 2;
+            const T* it = first + step;
+            if (it->sym < val) {
+                first = it + 1;
+                count -= step + 1;
+            } else {
+                count = step;
+            }
+        }
+        return first;
+    }
+
+    inline __attribute__((always_inline)) bool MatchSym(const SymName& n, const char* s) {
+        return s[0] == n.name[0] && __builtin_strcmp(n.name, s) == 0;
     }
 }
 
@@ -47,7 +61,7 @@ Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
 }
 
 bool Elf::ParseHeader() {
-    if (memcmp(header_->e_ident, ELFMAG, SELFMAG) != 0) return false;
+    if (*reinterpret_cast<uint32_t*>(header_->e_ident) != *reinterpret_cast<const uint32_t*>(ELFMAG)) return false;
     if (header_->e_type != ET_EXEC && header_->e_type != ET_DYN) return false;
     
     uint16_t m = header_->e_machine;
@@ -113,19 +127,29 @@ void Elf::DoReloc(ElfW(Addr) rel, ElfW(Word) size, bool is_plt) {
 
 void Elf::BuildRelocIndex() {
     size_t r_sz = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
-    plt_relocs_.reserve(rel_plt_size_ / r_sz); dyn_relocs_.reserve(rel_dyn_size_ / r_sz);
-    DoReloc(rel_plt_, rel_plt_size_, true); DoReloc(rel_dyn_, rel_dyn_size_, false);
-    auto cmp = [](const auto& a, const auto& b) { return a.sym < b.sym; };
-    if (!plt_relocs_.empty()) ::sort(plt_relocs_.begin(), plt_relocs_.end(), cmp);
-    if (!dyn_relocs_.empty()) ::sort(dyn_relocs_.begin(), dyn_relocs_.end(), cmp);
+    plt_relocs_.reserve(rel_plt_size_ / r_sz); 
+    dyn_relocs_.reserve(rel_dyn_size_ / r_sz);
+    DoReloc(rel_plt_, rel_plt_size_, true); 
+    DoReloc(rel_dyn_, rel_dyn_size_, false);
+    
+    auto cmp = [](const Reloc& a, const Reloc& b) { return a.sym < b.sym; };
+    if (plt_relocs_.size > 0) ::sort(plt_relocs_.data, plt_relocs_.data + plt_relocs_.size, cmp);
+    if (dyn_relocs_.size > 0) ::sort(dyn_relocs_.data, dyn_relocs_.data + dyn_relocs_.size, cmp);
 }
 
 uint32_t Elf::GnuLookup(const SymName& name) const {
     if (!bloom_) return 0;
-    static constexpr auto bbits = sizeof(ElfW(Addr)) * 8;
-    auto word = bloom_[(name.gnu_hash / bbits) % bloom_size_];
-    auto mask = uintptr_t(1) << (name.gnu_hash % bbits) | uintptr_t(1) << ((name.gnu_hash >> bloom_shift_) % bbits);
-    if ((word & mask) != mask) return 0;
+    constexpr uint32_t ADDR_BITS = sizeof(ElfW(Addr)) * 8;
+    constexpr uint32_t ADDR_MASK = ADDR_BITS - 1;
+
+    uint32_t word_num = (name.gnu_hash / ADDR_BITS) & (bloom_size_ - 1);
+    uint32_t h2 = name.gnu_hash >> bloom_shift_;
+
+    ElfW(Addr) mask = (((ElfW(Addr))1) << (name.gnu_hash & ADDR_MASK)) |
+                      (((ElfW(Addr))1) << (h2 & ADDR_MASK));
+
+    if ((bloom_[word_num] & mask) != mask) return 0;
+
     for (uint32_t i = bucket_[name.gnu_hash % bucket_count_]; i >= sym_offset_ && i != 0; ++i) {
         if (((chain_[i] ^ name.gnu_hash) >> 1) == 0 && MatchSym(name, dyn_str_ + dyn_sym_[i].st_name)) return i;
         if (chain_[i] & 1) break;
@@ -146,16 +170,24 @@ uint32_t Elf::LinearLookup(const SymName& name) const {
     return 0;
 }
 
-void Elf::FindPltAddr(std::string_view name, std::vector<uintptr_t> &res) const {
-    res.clear(); SymName sn(name);
+void Elf::FindPltAddr(const char* name, AddrList& res) const {
+    res.clear(); 
+    SymName sn(name);
     uint32_t idx = GnuLookup(sn);
     if (!idx) idx = ElfLookup(sn);
     if (!idx) idx = LinearLookup(sn);
     if (!idx) return;
 
-    auto find = [&](const std::vector<Reloc>& v, bool plt) {
-        auto it = std::lower_bound(v.begin(), v.end(), idx, [](const Reloc& r, uint32_t id) { return r.sym < id; });
-        for (; it != v.end() && it->sym == idx; ++it) { res.push_back(it->addr); if (plt) break; }
+    auto find = [&](const RelocList& v, bool plt) {
+        const Reloc* end = v.data + v.size;
+        const Reloc* it = ::lower_bound(v.data, end, idx);
+
+        for (; it < end && it->sym == idx; ++it) { 
+            res.push_back(it->addr); 
+            if (plt) break; 
+        }
     };
-    find(plt_relocs_, true); find(dyn_relocs_, false);
+
+    find(plt_relocs_, true); 
+    find(dyn_relocs_, false);
 }
