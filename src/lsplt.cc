@@ -60,6 +60,10 @@ struct FastList {
         if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
         data[size++] = static_cast<T&&>(val);
     }
+    T& emplace_back() {
+        if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
+        return data[size++];
+    }
     void insert(size_t index, const T& val) {
         if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
         if (index < size) __builtin_memmove(&data[index + 1], &data[index], (size - index) * sizeof(T));
@@ -473,11 +477,16 @@ MapInfoList Scan() {
 bool RegisterHook(dev_t d, ino_t i, const char* s, void *c, void **b) {
     if (d == 0 || i == 0 || !s || s[0] == '\0' || !c) return false;
     const MutexGuard lock(&g_mtx); 
-    HookRequest r{d, i, 0, (uintptr_t)-1, {0}, c, b};
+    HookRequest& r = g_pend.emplace_back();
+    r.dev = d;
+    r.inode = i;
+    r.offset_range_start = 0;
+    r.offset_range_end = (uintptr_t)-1;
     size_t l = MIN_VAL(__builtin_strlen(s), sizeof(r.symbol) - 1); 
     __builtin_memcpy(r.symbol, s, l); 
     r.symbol[l] = '\0';
-    g_pend.push_back(r); 
+    r.callback = c;
+    r.backup = b;
     return true;
 }
 
