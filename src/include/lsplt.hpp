@@ -36,8 +36,11 @@ struct MapInfoList {
     }
     void push_back(const MapInfo& m) {
         if (size >= capacity) {
-            capacity = capacity == 0 ? 64 : capacity * 2;
-            data = (MapInfo*)realloc(data, capacity * sizeof(MapInfo));
+            size_t new_cap = capacity == 0 ? 64 : capacity * 2;
+            void* new_data = realloc(data, new_cap * sizeof(MapInfo));
+            if (!new_data) return;
+            capacity = new_cap;
+            data = (MapInfo*)new_data;
         }
         data[size++] = m;
     }

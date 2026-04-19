@@ -38,14 +38,19 @@ class Elf {
         ~RelocList() { free(data); }
         void reserve(size_t n) {
             if (n > capacity) {
+                void* new_data = realloc(data, n * sizeof(Reloc));
+                if (!new_data) return;
                 capacity = n;
-                data = (Reloc*)realloc(data, capacity * sizeof(Reloc));
+                data = (Reloc*)new_data;
             }
         }
         void push_back(Reloc r) {
             if (size >= capacity) {
-                capacity = capacity == 0 ? 64 : capacity * 2;
-                data = (Reloc*)realloc(data, capacity * sizeof(Reloc));
+                size_t new_cap = capacity == 0 ? 64 : capacity * 2;
+                void* new_data = realloc(data, new_cap * sizeof(Reloc));
+                if (!new_data) return;
+                capacity = new_cap;
+                data = (Reloc*)new_data;
             }
             data[size++] = r;
         }
@@ -59,8 +64,11 @@ public:
         ~AddrList() { free(data); }
         void push_back(uintptr_t addr) {
             if (size >= capacity) {
-                capacity = capacity == 0 ? 4 : capacity * 2;
-                data = (uintptr_t*)realloc(data, capacity * sizeof(uintptr_t));
+                size_t new_cap = capacity == 0 ? 4 : capacity * 2;
+                void* new_data = realloc(data, new_cap * sizeof(uintptr_t));
+                if (!new_data) return;
+                capacity = new_cap;
+                data = (uintptr_t*)new_data;
             }
             data[size++] = addr;
         }

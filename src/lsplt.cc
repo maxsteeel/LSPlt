@@ -46,9 +46,11 @@ struct FastList {
     }
     void reserve(size_t n) {
         if (n > capacity) {
+            void* new_data = realloc(data, n * sizeof(T));
+            if (!new_data) return;
             size_t old_cap = capacity;
             capacity = n;
-            data = (T*)realloc(data, capacity * sizeof(T));
+            data = (T*)new_data;
             __builtin_memset((void*)(data + old_cap), 0, (capacity - old_cap) * sizeof(T));
         }
     }
