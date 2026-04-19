@@ -7,23 +7,23 @@ struct SymName {
     const char* name;
     size_t len;
     uint32_t gnu_hash = 5381;
+    uint32_t elf_hash = 0;
 
     explicit SymName(const char* n) : name(n) {
         len = 0;
         // Calcula el hash y la longitud en un solo recorrido de caché L1
         for (const char* ptr = n; *ptr != '\0'; ++ptr) {
             gnu_hash = (gnu_hash << 5) + gnu_hash + *ptr;
+
+            elf_hash = (elf_hash << 4) + *ptr;
+            uint32_t tmp = elf_hash & 0xf0000000;
+            if (tmp) elf_hash ^= tmp | (tmp >> 24);
+
             len++;
         }
     }
 
     uint32_t GetElfHash() const {
-        uint32_t elf_hash = 0;
-        for (size_t i = 0; i < len; ++i) {
-            elf_hash = (elf_hash << 4) + name[i];
-            uint32_t tmp = elf_hash & 0xf0000000;
-            if (tmp) elf_hash ^= tmp | (tmp >> 24);
-        }
         return elf_hash;
     }
 };
