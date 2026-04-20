@@ -35,22 +35,30 @@ class Elf {
         Reloc* data = nullptr;
         size_t size = 0;
         size_t capacity = 0;
-        ~RelocList() { free(data); }
+        ~RelocList() { if (data) free(data); }
+        // Disable copy and move for safety in this specific inner class context
+        RelocList() = default;
+        RelocList(const RelocList&) = delete;
+        RelocList& operator=(const RelocList&) = delete;
         void reserve(size_t n) {
             if (n > capacity) {
-                void* new_data = realloc(data, n * sizeof(Reloc));
-                if (!new_data) return;
+                void* new_data = malloc(n * sizeof(Reloc));
+                if (!new_data) return; // OOM Fallback
+                if (data && size > 0) { __builtin_memcpy(new_data, data, size * sizeof(Reloc)); }
+                if (data) free(data);
                 capacity = n;
-                data = (Reloc*)new_data;
+                data = static_cast<Reloc*>(new_data);
             }
         }
         void push_back(Reloc r) {
             if (size >= capacity) {
                 size_t new_cap = capacity == 0 ? 64 : capacity * 2;
-                void* new_data = realloc(data, new_cap * sizeof(Reloc));
+                void* new_data = malloc(new_cap * sizeof(Reloc));
                 if (!new_data) return;
+                if (data && size > 0) { __builtin_memcpy(new_data, data, size * sizeof(Reloc)); }
+                if (data) free(data);
                 capacity = new_cap;
-                data = (Reloc*)new_data;
+                data = static_cast<Reloc*>(new_data);
             }
             data[size++] = r;
         }
@@ -61,14 +69,20 @@ public:
         uintptr_t* data = nullptr;
         size_t size = 0;
         size_t capacity = 0;
-        ~AddrList() { free(data); }
+        ~AddrList() { if (data) free(data); }
+        // Disable copy and move
+        AddrList() = default;
+        AddrList(const AddrList&) = delete;
+        AddrList& operator=(const AddrList&) = delete;
         void push_back(uintptr_t addr) {
             if (size >= capacity) {
                 size_t new_cap = capacity == 0 ? 4 : capacity * 2;
-                void* new_data = realloc(data, new_cap * sizeof(uintptr_t));
-                if (!new_data) return;
+                void* new_data = malloc(new_cap * sizeof(uintptr_t));
+                if (!new_data) return; 
+                if (data && size > 0) { __builtin_memcpy(new_data, data, size * sizeof(uintptr_t)); }
+                if (data) free(data);
                 capacity = new_cap;
-                data = (uintptr_t*)new_data;
+                data = static_cast<uintptr_t*>(new_data);
             }
             data[size++] = addr;
         }

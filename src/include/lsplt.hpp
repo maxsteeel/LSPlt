@@ -22,28 +22,40 @@ struct MapInfoList {
     MapInfo* data = nullptr;
     size_t size = 0;
     size_t capacity = 0;
-    ~MapInfoList() { free(data); }
     MapInfoList() = default;
+    MapInfoList(const MapInfoList&) = delete;
+    MapInfoList& operator=(const MapInfoList&) = delete;
     MapInfoList(MapInfoList&& o) noexcept : data(o.data), size(o.size), capacity(o.capacity) {
-        o.data = nullptr; o.size = o.capacity = 0;
+        o.data = nullptr; 
+        o.size = o.capacity = 0;
     }
     MapInfoList& operator=(MapInfoList&& o) noexcept {
         if (this != &o) { 
-            free(data); data = o.data; size = o.size; capacity = o.capacity; 
-            o.data = nullptr; o.size = o.capacity = 0; 
+            if (data) free(data); 
+            data = o.data; 
+            size = o.size; 
+            capacity = o.capacity; 
+            o.data = nullptr; 
+            o.size = o.capacity = 0; 
         }
         return *this;
+    }
+    ~MapInfoList() { 
+        if (data) free(data); 
     }
     void push_back(const MapInfo& m) {
         if (size >= capacity) {
             size_t new_cap = capacity == 0 ? 64 : capacity * 2;
-            void* new_data = realloc(data, new_cap * sizeof(MapInfo));
+            MapInfo* new_data = static_cast<MapInfo*>(malloc(new_cap * sizeof(MapInfo)));
             if (!new_data) return;
+            if (data && size > 0) { __builtin_memcpy(new_data, data, size * sizeof(MapInfo)); }
+            if (data) free(data);
+            data = new_data;
             capacity = new_cap;
-            data = (MapInfo*)new_data;
         }
         data[size++] = m;
     }
+    void clear() { size = 0; }
 };
 
 [[maybe_unused, gnu::visibility("default")]] MapInfoList Scan();

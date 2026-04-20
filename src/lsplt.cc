@@ -28,30 +28,38 @@ struct FastList {
     T* data = nullptr;
     size_t size = 0;
     size_t capacity = 0;
+    FastList() = default;
     ~FastList() { 
         if (data) {
             for (size_t i = 0; i < size; i++) data[i].~T();
             free(data); 
         }
     }
-    FastList() = default;
-    FastList(FastList&& o) noexcept : data(o.data), size(o.size), capacity(o.capacity) { o.data = nullptr; o.size = o.capacity = 0; }
+    FastList(FastList&& o) noexcept : data(o.data), size(o.size), capacity(o.capacity) { 
+        o.data = nullptr; o.size = o.capacity = 0; 
+    }
     FastList& operator=(FastList&& o) noexcept {
         if (this != &o) { 
-            if (data) { for (size_t i = 0; i < size; i++) data[i].~T(); free(data); }
+            if (data) { 
+                for (size_t i = 0; i < size; i++) data[i].~T(); 
+                free(data); 
+            }
             data = o.data; size = o.size; capacity = o.capacity; 
             o.data = nullptr; o.size = o.capacity = 0; 
         }
         return *this;
     }
+    FastList(const FastList&) = delete;
+    FastList& operator=(const FastList&) = delete;
     void reserve(size_t n) {
         if (n > capacity) {
-            void* new_data = realloc(data, n * sizeof(T));
+            T* new_data = static_cast<T*>(malloc(n * sizeof(T)));
             if (!new_data) return;
-            size_t old_cap = capacity;
+            if (data && size > 0) { __builtin_memcpy((void*)new_data, data, size * sizeof(T)); }
+            __builtin_memset(reinterpret_cast<void*>(new_data + size), 0, (n - size) * sizeof(T));
+            if (data) free(data);
+            data = new_data;
             capacity = n;
-            data = (T*)new_data;
-            __builtin_memset((void*)(data + old_cap), 0, (capacity - old_cap) * sizeof(T));
         }
     }
     void push_back(const T& val) {
@@ -68,11 +76,18 @@ struct FastList {
     }
     void insert(size_t index, const T& val) {
         if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
-        if (index < size) __builtin_memmove(&data[index + 1], &data[index], (size - index) * sizeof(T));
+        if (index < size) {
+            __builtin_memmove(&data[index + 1], &data[index], (size - index) * sizeof(T));
+        }
         data[index] = val;
         size++;
     }
-    void clear() { size = 0; }
+    void clear() { 
+        // If T has important destructors (like Regex), 
+        // they should be called here before resetting the size.
+        for (size_t i = 0; i < size; i++) data[i].~T();
+        size = 0; 
+    }
     bool empty() const { return size == 0; }
     T* begin() { return data; }
     T* end() { return data + size; }
