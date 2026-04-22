@@ -8,7 +8,7 @@
 #include <link.h>
 #include <unistd.h>
 #include <pthread.h>
-#include <cstring>
+#include <string.h>
 #include "elf_util.hpp"
 #include "logging.hpp"
 #include "syscall.hpp"
