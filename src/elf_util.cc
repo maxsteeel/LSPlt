@@ -31,27 +31,12 @@
 #endif
 
 namespace {
-    template<typename T>
-    static inline const T* lower_bound(const T* first, const T* last, uint32_t val) {
-        size_t count = last - first;
-        while (count > 0) {
-            size_t step = count / 2;
-            const T* it = first + step;
-            if (it->sym < val) {
-                first = it + 1;
-                count -= step + 1;
-            } else {
-                count = step;
-            }
-        }
-        return first;
-    }
-
     inline __attribute__((always_inline)) bool MatchSym(const SymName& n, const char* s) {
         return s[0] == n.name[0] && __builtin_strcmp(n.name, s) == 0;
     }
 }
 
+__attribute__((noinline))
 Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
     header_ = reinterpret_cast<ElfW(Ehdr)*>(base_addr);
     if (ParseHeader() && ParseDynamicTable()) {
@@ -80,6 +65,7 @@ bool Elf::ParseHeader() {
 #endif
 }
 
+__attribute__((noinline))
 bool Elf::ParseDynamicTable() {
     auto* phdr = reinterpret_cast<ElfW(Phdr)*>(base_addr_ + header_->e_phoff);
     for (int i = 0; i < header_->e_phnum; i++) {
@@ -99,7 +85,6 @@ bool Elf::ParseDynamicTable() {
             case DT_PLTRELSZ: rel_plt_size_ = d->d_un.d_val; break;
             case DT_REL: case DT_RELA: rel_dyn_ = val; break;
             case DT_RELSZ: case DT_RELASZ: rel_dyn_size_ = d->d_un.d_val; break;
-            case DT_HASH: if (!bloom_) { auto* r = reinterpret_cast<ElfW(Word)*>(val); bucket_count_ = r[0]; bucket_ = r + 2; chain_ = bucket_ + bucket_count_; } break;
             case DT_GNU_HASH: { auto* r = reinterpret_cast<ElfW(Word)*>(val); bucket_count_ = r[0]; sym_offset_ = r[1]; bloom_size_ = r[2]; bloom_shift_ = r[3];
                 bloom_ = reinterpret_cast<ElfW(Addr)*>(r + 4); bucket_ = reinterpret_cast<uint32_t*>(bloom_ + bloom_size_); chain_ = bucket_ + bucket_count_ - sym_offset_; } break;
         }
@@ -107,10 +92,14 @@ bool Elf::ParseDynamicTable() {
     return dyn_str_ && dyn_sym_;
 }
 
-template <typename T>
+__attribute__((noinline, cold))
 void Elf::ProcessReloc(ElfW(Addr) begin, ElfW(Word) size, bool is_plt) {
-    auto* end = reinterpret_cast<const T*>(begin + size);
-    for (auto* r = reinterpret_cast<const T*>(begin); r < end; ++r) {
+    if (!begin || !size) return;
+    size_t stride = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+    uintptr_t end = begin + size;
+    
+    for (uintptr_t ptr = begin; ptr < end; ptr += stride) {
+        auto* r = reinterpret_cast<const ElfW(Rel)*>(ptr);
         auto type = ELF_R_TYPE(r->r_info);
         if (is_plt ? (type == R_JUMP_SLOT) : (type == R_ABS || type == R_GLOB_DAT)) {
             ElfW(Addr) addr = bias_addr_ + r->r_offset;
@@ -119,24 +108,16 @@ void Elf::ProcessReloc(ElfW(Addr) begin, ElfW(Word) size, bool is_plt) {
     }
 }
 
-void Elf::DoReloc(ElfW(Addr) rel, ElfW(Word) size, bool is_plt) {
-    if (!rel) return;
-    if (is_use_rela_) ProcessReloc<ElfW(Rela)>(rel, size, is_plt);
-    else ProcessReloc<ElfW(Rel)>(rel, size, is_plt);
-}
-
+__attribute__((noinline))
 void Elf::BuildRelocIndex() {
     size_t r_sz = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
     plt_relocs_.reserve(rel_plt_size_ / r_sz); 
     dyn_relocs_.reserve(rel_dyn_size_ / r_sz);
-    DoReloc(rel_plt_, rel_plt_size_, true); 
-    DoReloc(rel_dyn_, rel_dyn_size_, false);
-    
-    auto cmp = [](const Reloc& a, const Reloc& b) { return a.sym < b.sym; };
-    if (plt_relocs_.size > 0) ::sort(plt_relocs_.data, plt_relocs_.data + plt_relocs_.size, cmp);
-    if (dyn_relocs_.size > 0) ::sort(dyn_relocs_.data, dyn_relocs_.data + dyn_relocs_.size, cmp);
+    ProcessReloc(rel_plt_, rel_plt_size_, true); 
+    ProcessReloc(rel_dyn_, rel_dyn_size_, false);
 }
 
+__attribute__((noinline))
 uint32_t Elf::GnuLookup(const SymName& name) const {
     if (!bloom_) return 0;
     constexpr uint32_t ADDR_BITS = sizeof(ElfW(Addr)) * 8;
@@ -157,37 +138,29 @@ uint32_t Elf::GnuLookup(const SymName& name) const {
     return 0;
 }
 
-uint32_t Elf::ElfLookup(const SymName& name) const {
-    if (!bucket_ || bloom_) return 0;
-    for (auto i = bucket_[name.GetElfHash() % bucket_count_]; i != 0; i = chain_[i])
-        if (MatchSym(name, dyn_str_ + dyn_sym_[i].st_name)) return i;
-    return 0;
-}
-
 uint32_t Elf::LinearLookup(const SymName& name) const {
     for (uint32_t i = 0; i < sym_offset_; i++)
         if (MatchSym(name, dyn_str_ + dyn_sym_[i].st_name)) return i;
     return 0;
 }
 
+__attribute__((noinline))
 void Elf::FindPltAddr(const char* name, AddrList& res) const {
     res.clear(); 
     SymName sn(name);
     uint32_t idx = GnuLookup(sn);
-    if (!idx) idx = ElfLookup(sn);
     if (!idx) idx = LinearLookup(sn);
     if (!idx) return;
 
-    auto find = [&](const RelocList& v, bool plt) {
-        const Reloc* end = v.data + v.size;
-        const Reloc* it = ::lower_bound(v.data, end, idx);
-
-        for (; it < end && it->sym == idx; ++it) { 
-            res.push_back(it->addr); 
-            if (plt) break; 
+    for (size_t i = 0; i < plt_relocs_.size; i++) {
+        if (plt_relocs_.data[i].sym == idx) {
+            res.push_back(plt_relocs_.data[i].addr);
+            break;
         }
-    };
-
-    find(plt_relocs_, true); 
-    find(dyn_relocs_, false);
+    }
+    for (size_t i = 0; i < dyn_relocs_.size; i++) {
+        if (dyn_relocs_.data[i].sym == idx) {
+            res.push_back(dyn_relocs_.data[i].addr);
+        }
+    }
 }

@@ -1,30 +1,20 @@
 #pragma once
 #include <link.h>
 #include <stdint.h>
-#include <stdlib.h> // malloc, free, realloc
+#include <stdlib.h> // malloc, free
+#include "include/lsplt.hpp"
 
 struct SymName {
     const char* name;
     size_t len;
     uint32_t gnu_hash = 5381;
-    uint32_t elf_hash = 0;
 
     explicit SymName(const char* n) : name(n) {
         len = 0;
-        // Calcula el hash y la longitud en un solo recorrido de caché L1
         for (const char* ptr = n; *ptr != '\0'; ++ptr) {
             gnu_hash = (gnu_hash << 5) + gnu_hash + *ptr;
-
-            elf_hash = (elf_hash << 4) + *ptr;
-            uint32_t tmp = elf_hash & 0xf0000000;
-            if (tmp) elf_hash ^= tmp | (tmp >> 24);
-
             len++;
         }
-    }
-
-    uint32_t GetElfHash() const {
-        return elf_hash;
     }
 };
 
@@ -42,23 +32,16 @@ class Elf {
         RelocList& operator=(const RelocList&) = delete;
         void reserve(size_t n) {
             if (n > capacity) {
-                void* new_data = malloc(n * sizeof(Reloc));
-                if (!new_data) return; // OOM Fallback
-                if (data && size > 0) { __builtin_memcpy(new_data, data, size * sizeof(Reloc)); }
-                if (data) free(data);
-                capacity = n;
-                data = static_cast<Reloc*>(new_data);
+                void* nd = memalloc(data, size, n, sizeof(Reloc), true);
+                if (nd) { data = static_cast<Reloc*>(nd); capacity = n; }
             }
         }
         void push_back(Reloc r) {
             if (size >= capacity) {
-                size_t new_cap = capacity == 0 ? 64 : capacity * 2;
-                void* new_data = malloc(new_cap * sizeof(Reloc));
-                if (!new_data) return;
-                if (data && size > 0) { __builtin_memcpy(new_data, data, size * sizeof(Reloc)); }
-                if (data) free(data);
-                capacity = new_cap;
-                data = static_cast<Reloc*>(new_data);
+                size_t n = capacity == 0 ? 64 : capacity * 2;
+                void* nd = memalloc(data, size, n, sizeof(Reloc), false);
+                if (nd) { data = static_cast<Reloc*>(nd); capacity = n; }
+                else return;
             }
             data[size++] = r;
         }
@@ -76,17 +59,15 @@ public:
         AddrList& operator=(const AddrList&) = delete;
         void push_back(uintptr_t addr) {
             if (size >= capacity) {
-                size_t new_cap = capacity == 0 ? 4 : capacity * 2;
-                void* new_data = malloc(new_cap * sizeof(uintptr_t));
-                if (!new_data) return; 
-                if (data && size > 0) { __builtin_memcpy(new_data, data, size * sizeof(uintptr_t)); }
-                if (data) free(data);
-                capacity = new_cap;
-                data = static_cast<uintptr_t*>(new_data);
+                size_t n = capacity == 0 ? 4 : capacity * 2;
+                void* nd = memalloc(data, size, n, sizeof(uintptr_t), false);
+                if (nd) { data = static_cast<uintptr_t*>(nd); capacity = n; }
+                else return;
             }
             data[size++] = addr;
         }
         void clear() { size = 0; }
+        bool empty() const { return size == 0; }
     };
 
 private:
@@ -106,13 +87,11 @@ private:
     bool is_use_rela_ = false, valid_ = false;
     RelocList plt_relocs_, dyn_relocs_;
 
-    template <typename T> void ProcessReloc(ElfW(Addr) begin, ElfW(Word) size, bool is_plt);
-    void DoReloc(ElfW(Addr) rel, ElfW(Word) size, bool is_plt);
+    void ProcessReloc(ElfW(Addr) begin, ElfW(Word) size, bool is_plt);
     void BuildRelocIndex();
     bool ParseHeader();
     bool ParseDynamicTable();
     uint32_t GnuLookup(const SymName& name) const;
-    uint32_t ElfLookup(const SymName& name) const;
     uint32_t LinearLookup(const SymName& name) const;
 
 public:
@@ -120,35 +99,3 @@ public:
     void FindPltAddr(const char* name, AddrList& res) const;
     bool Valid() const { return valid_; }
 };
-
-template<class It, class Compare>
-inline void sort(It first, It last, Compare comp) {
-    size_t n = last - first;
-    if (n <= 1) return;
-    
-    if (n < 32) {
-        for (size_t i = 1; i < n; i += 1) {
-            auto temp = *(first + i);
-            size_t j;
-            for (j = i; j > 0 && comp(temp, *(first + (j - 1))); j -= 1) {
-                *(first + j) = *(first + (j - 1));
-            }
-            *(first + j) = temp;
-        }
-        return;
-    }
-    
-    size_t gap = 1;
-    while (gap < n / 3) gap = 3 * gap + 1;
-    
-    for (; gap > 0; gap /= 3) {
-        for (size_t i = gap; i < n; i += 1) {
-            auto temp = *(first + i);
-            size_t j;
-            for (j = i; j >= gap && comp(temp, *(first + (j - gap))); j -= gap) {
-                *(first + j) = *(first + (j - gap));
-            }
-            *(first + j) = temp;
-        }
-    }
-}

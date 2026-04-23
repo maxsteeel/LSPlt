@@ -5,6 +5,15 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+static void* memalloc(void* old_data, size_t old_size, size_t new_cap, size_t elem_size, bool reserve) {
+    void* new_data = malloc(new_cap * elem_size);
+    if (!new_data) return nullptr;
+    if (old_data && old_size > 0) __builtin_memcpy(new_data, old_data, old_size * elem_size);
+    if (reserve) __builtin_memset(reinterpret_cast<char*>(new_data) + (old_size * elem_size), 0, (new_cap - old_size) * elem_size);
+    if (old_data) free(old_data);
+    return new_data;
+}
+
 namespace lsplt {
 inline namespace v2 {
 struct MapInfo {
@@ -45,13 +54,10 @@ struct MapInfoList {
     }
     void push_back(const MapInfo& m) {
         if (size >= capacity) {
-            size_t new_cap = capacity == 0 ? 64 : capacity * 2;
-            MapInfo* new_data = static_cast<MapInfo*>(malloc(new_cap * sizeof(MapInfo)));
-            if (!new_data) return;
-            if (data && size > 0) { __builtin_memcpy(new_data, data, size * sizeof(MapInfo)); }
-            if (data) free(data);
-            data = new_data;
-            capacity = new_cap;
+            size_t n = capacity == 0 ? 64 : capacity * 2;
+            void* nd = memalloc(data, size, n, sizeof(MapInfo), false);
+            if (nd) { data = static_cast<MapInfo*>(nd); capacity = n; }
+            else return;
         }
         data[size++] = m;
     }
@@ -60,7 +66,6 @@ struct MapInfoList {
 
 [[maybe_unused, gnu::visibility("default")]] MapInfoList Scan();
 [[maybe_unused, gnu::visibility("default")]] bool RegisterHook(dev_t dev, ino_t inode, const char* symbol, void *callback, void **backup);
-[[maybe_unused, gnu::visibility("default")]] bool CommitHook();
 [[maybe_unused, gnu::visibility("default")]] bool CommitHook(MapInfoList &maps, bool unhook = false);
 
 } // namespace v2

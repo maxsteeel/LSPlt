@@ -18,10 +18,9 @@
 
 namespace {
 
-struct ActiveHook {
-    uintptr_t addr;
-    uintptr_t orig_ptr;
-};
+struct ActiveHook { uintptr_t addr; uintptr_t orig_ptr; };
+struct PendingPatch { uintptr_t addr; uintptr_t callback; uintptr_t *backup; };
+struct HookRequest { dev_t dev; ino_t inode; char symbol[128]; void *callback; void **backup; };
 
 template <typename T>
 struct FastList {
@@ -29,21 +28,13 @@ struct FastList {
     size_t size = 0;
     size_t capacity = 0;
     FastList() = default;
-    ~FastList() { 
-        if (data) {
-            for (size_t i = 0; i < size; i++) data[i].~T();
-            free(data); 
-        }
-    }
+    ~FastList() { clear(); free(data); }
     FastList(FastList&& o) noexcept : data(o.data), size(o.size), capacity(o.capacity) { 
         o.data = nullptr; o.size = o.capacity = 0; 
     }
     FastList& operator=(FastList&& o) noexcept {
         if (this != &o) { 
-            if (data) { 
-                for (size_t i = 0; i < size; i++) data[i].~T(); 
-                free(data); 
-            }
+            clear(); free(data);
             data = o.data; size = o.size; capacity = o.capacity; 
             o.data = nullptr; o.size = o.capacity = 0; 
         }
@@ -53,61 +44,26 @@ struct FastList {
     FastList& operator=(const FastList&) = delete;
     void reserve(size_t n) {
         if (n > capacity) {
-            T* new_data = static_cast<T*>(malloc(n * sizeof(T)));
-            if (!new_data) return;
-            if (data && size > 0) { __builtin_memcpy((void*)new_data, data, size * sizeof(T)); }
-            __builtin_memset(reinterpret_cast<void*>(new_data + size), 0, (n - size) * sizeof(T));
-            if (data) free(data);
-            data = new_data;
-            capacity = n;
+            void* nd = memalloc(data, size, n, sizeof(T), true);
+            if (nd) { data = static_cast<T*>(nd); capacity = n; }
         }
     }
     void push_back(const T& val) {
         if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
-        data[size++] = val;
+        if (data) data[size++] = val;
     }
     void push_back(T&& val) {
         if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
-        data[size++] = static_cast<T&&>(val);
-    }
-    T& emplace_back() {
-        if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
-        return data[size++];
-    }
-    void insert(size_t index, const T& val) {
-        if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
-        if (index < size) {
-            __builtin_memmove(&data[index + 1], &data[index], (size - index) * sizeof(T));
-        }
-        data[index] = val;
-        size++;
+        if (data) data[size++] = static_cast<T&&>(val);
     }
     void clear() { 
-        // If T has important destructors (like Regex), 
-        // they should be called here before resetting the size.
-        for (size_t i = 0; i < size; i++) data[i].~T();
+        if (data) for (size_t i = 0; i < size; i++) data[i].~T();
         size = 0; 
     }
     bool empty() const { return size == 0; }
-    T* begin() { return data; }
-    T* end() { return data + size; }
 };
 
-struct PendingPatch { uintptr_t addr; uintptr_t callback; uintptr_t *backup; };
-
-struct HookRequest {
-    dev_t dev;
-    ino_t inode;
-    uintptr_t offset_range_start;
-    uintptr_t offset_range_end;
-    char symbol[128];
-    void *callback;
-    void **backup;
-};
-
-inline auto PageStart(uintptr_t a) { 
-    return reinterpret_cast<char *>(a & lsplt::sys::SysPageMask()); 
-}
+inline auto PageStart(uintptr_t a) { return reinterpret_cast<char *>(a & lsplt::sys::SysPageMask()); }
 
 struct HookInfo : public lsplt::MapInfo {
     FastList<ActiveHook> hooks;
@@ -127,45 +83,19 @@ struct HookInfo : public lsplt::MapInfo {
             lsplt::MapInfo::operator=(o);
             hooks = static_cast<FastList<ActiveHook>&&>(o.hooks);
             backup = o.backup;
-            delete elf;
-            elf = o.elf;
-            self = o.self;
-            o.elf = nullptr;
+            delete elf; elf = o.elf; self = o.self; o.elf = nullptr;
         }
         return *this;
     }
 
-    bool Match(const HookRequest &i) const { 
-        return i.dev == dev && i.inode == inode && offset >= i.offset_range_start && offset < i.offset_range_end; 
-    }
+    bool Match(const HookRequest &i) const { return i.dev == dev && i.inode == inode; }
 };
-
-template<typename T, typename Func>
-static inline size_t lower_bound(const T* arr, size_t size, uintptr_t val, Func comp) {
-    size_t low = 0, high = size;
-    while (low < high) {
-        size_t mid = low + (high - low) / 2;
-        if (comp(arr[mid], val)) low = mid + 1;
-        else high = mid;
-    }
-    return low;
-}
-
-template<typename T, typename Func>
-static inline size_t upper_bound(const T* arr, size_t size, uintptr_t val, Func comp) {
-    size_t low = 0, high = size;
-    while (low < high) {
-        size_t mid = low + (high - low) / 2;
-        if (comp(val, arr[mid])) high = mid;
-        else low = mid + 1;
-    }
-    return low;
-}
 
 class HookInfos {
 public:
     FastList<HookInfo> data;
 
+    __attribute__((noinline))
     static auto CreateTargetsFromMemoryMaps(lsplt::MapInfoList &maps) {
         static ino_t kSelfInode = 0; static dev_t kSelfDev = 0;
         HookInfos info; info.data.reserve(maps.size);
@@ -180,89 +110,46 @@ public:
         return info;
     }
 
-    void Filter(const FastList<HookRequest> &register_info) {
-        if (register_info.empty()) { data.clear(); return; }
-        static FastList<const HookRequest*> sorted; 
-        sorted.clear(); sorted.reserve(register_info.size);
-        for (size_t i = 0; i < register_info.size; i++) sorted.push_back(&register_info.data[i]);
-        ::sort(sorted.begin(), sorted.end(), [](const HookRequest* a, const HookRequest* b) {
-            if (a->dev != b->dev) return a->dev < b->dev;
-            return a->inode < b->inode;
-        });
+    __attribute__((noinline))
+    void Filter(const FastList<HookRequest> &reg_info) {
+        if (reg_info.empty()) { data.clear(); return; }
         size_t new_size = 0;
         for (size_t i = 0; i < data.size; i++) {
-            auto& info = data.data[i];
             bool keep = false;
-            size_t low = 0, high = sorted.size;
-            while (low < high) {
-                size_t mid = low + (high - low) / 2;
-                if (sorted.data[mid]->dev < info.dev || (sorted.data[mid]->dev == info.dev && sorted.data[mid]->inode < info.inode)) low = mid + 1;
-                else high = mid;
-            }
-            for (size_t j = low; j < sorted.size && sorted.data[j]->dev == info.dev && sorted.data[j]->inode == info.inode; ++j) {
-                if (info.Match(*sorted.data[j])) { keep = true; break; } 
+            for (size_t j = 0; j < reg_info.size; j++) {
+                if (data.data[i].Match(reg_info.data[j])) { keep = true; break; }
             }
             if (keep) {
-                if (new_size != i) {
-                    data.data[new_size].~HookInfo();
-                    __builtin_memcpy((void*)&data.data[new_size], (void*)&data.data[i], sizeof(HookInfo));
-                    __builtin_memset((void*)&data.data[i], 0, sizeof(HookInfo));
-                }
+                if (new_size != i) data.data[new_size] = static_cast<HookInfo&&>(data.data[i]);
                 new_size++;
-            } else {
-                data.data[i].~HookInfo();
-                __builtin_memset((void*)&data.data[i], 0, sizeof(HookInfo));
             }
         }
         data.size = new_size;
     }
 
+    __attribute__((noinline))
     void Merge(HookInfos &old) {
         if (old.data.empty()) return;
-        FastList<uintptr_t> backups; 
-        for (size_t i = 0; i < old.data.size; i++) {
-            if (old.data.data[i].backup) backups.push_back(old.data.data[i].backup);
-        }
-        if (!backups.empty()) {
-            ::sort(backups.begin(), backups.end(), [](uintptr_t a, uintptr_t b) { return a < b; });
-            size_t dest = 0, it = 0;
-            size_t backup_it = 0;
-            while (it < data.size && backup_it < backups.size) {
-                if (data.data[it].start < backups.data[backup_it]) {
-                    if (dest != it) data.data[dest] = static_cast<HookInfo&&>(data.data[it]);
-                    dest++; it++;
+        for (size_t i = 0; i < data.size; i++) {
+            for (size_t j = 0; j < old.data.size; j++) {
+                if (data.data[i].start == old.data.data[j].start && old.data.data[j].backup) {
+                    data.data[i].backup = old.data.data[j].backup;
+                    data.data[i].elf = old.data.data[j].elf; 
+                    old.data.data[j].elf = nullptr;
+                    data.data[i].hooks = static_cast<FastList<ActiveHook>&&>(old.data.data[j].hooks);
+                    old.data.data[j].backup = 0;
+                    break;
                 }
-                else if (data.data[it].start > backups.data[backup_it]) backup_it++;
-                else it++;
             }
-            while (it < data.size) {
-                if (dest != it) data.data[dest] = static_cast<HookInfo&&>(data.data[it]);
-                dest++; it++;
-            }
-            data.size = dest;
         }
-        FastList<HookInfo> merged; 
-        merged.reserve(data.size + old.data.size);
-        size_t it1 = 0, it2 = 0;
-        while (it1 < data.size && it2 < old.data.size) {
-            if (data.data[it1].start < old.data.data[it2].start) merged.push_back(static_cast<HookInfo&&>(data.data[it1++]));
-            else if (data.data[it1].start > old.data.data[it2].start) { 
-                if (old.data.data[it2].backup) merged.push_back(static_cast<HookInfo&&>(old.data.data[it2])); 
-                it2++; 
-            }
-            else { merged.push_back(static_cast<HookInfo&&>(old.data.data[it2++])); it1++; }
+        for (size_t j = 0; j < old.data.size; j++) {
+            if (old.data.data[j].backup) data.push_back(static_cast<HookInfo&&>(old.data.data[j]));
         }
-        while (it1 < data.size) merged.push_back(static_cast<HookInfo&&>(data.data[it1++]));
-        while (it2 < old.data.size) { 
-            if (old.data.data[it2].backup) merged.push_back(static_cast<HookInfo&&>(old.data.data[it2])); 
-            it2++; 
-        }
-        data = static_cast<FastList<HookInfo>&&>(merged);
     }
 
+    __attribute__((noinline))
     bool BatchPatchPLTEntries(HookInfo& info, FastList<PendingPatch>& patches) {
         if (patches.empty()) return true;
-        ::sort(patches.begin(), patches.end(), [](const auto& a, const auto& b) { return a.addr < b.addr; });
         const auto len = info.end - info.start;
         if (!info.backup && !info.self) {
             void *bkp = lsplt::sys::mmap(nullptr, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
@@ -287,9 +174,7 @@ public:
 
         auto restore_page_prot = [&]() {
             if (pg_unprot) {
-                if (clr_s) {
-                    __builtin___clear_cache(reinterpret_cast<char*>(clr_s), reinterpret_cast<char*>(clr_e));
-                }
+                if (clr_s) __builtin___clear_cache(reinterpret_cast<char*>(clr_s), reinterpret_cast<char*>(clr_e));
                 lsplt::sys::mprotect(reinterpret_cast<void*>(cur_pg), lsplt::sys::SysPageSize(), info.perms);
             }
         };
@@ -304,73 +189,58 @@ public:
                 if (pg_s != cur_pg) {
                     restore_page_prot();
                     if (lsplt::sys::mprotect((void*)pg_s, lsplt::sys::SysPageSize(), info.perms | PROT_WRITE) == 0) {
-                        cur_pg = pg_s;
-                        pg_unprot = true;
-                        clr_s = clr_e = 0;
-                    } else {
-                        res = false;
-                        continue;
-                    }
+                        cur_pg = pg_s; pg_unprot = true; clr_s = clr_e = 0;
+                    } else { res = false; continue; }
                 }
                 if (pg_unprot) {
                     *t_addr = p.callback;
-                    if (p.backup) {
-                        *p.backup = t_bkp;
-                    }
-                    if (!clr_s) {
-                        clr_s = p.addr;
-                        clr_e = p.addr + sizeof(uintptr_t);
-                    } else {
-                        clr_s = MIN_VAL(clr_s, p.addr);
-                        clr_e = MAX_VAL(clr_e, p.addr + sizeof(uintptr_t));
-                    }
+                    if (p.backup) *p.backup = t_bkp;
+                    if (!clr_s) { clr_s = p.addr; clr_e = p.addr + sizeof(uintptr_t); } 
+                    else { clr_s = MIN_VAL(clr_s, p.addr); clr_e = MAX_VAL(clr_e, p.addr + sizeof(uintptr_t)); }
                 }
             }
-            size_t idx = ::lower_bound(info.hooks.data, info.hooks.size, p.addr, [](const ActiveHook& h, uintptr_t a) { return h.addr < a; });
-            if (idx < info.hooks.size && info.hooks.data[idx].addr == p.addr) {
-                info.hooks.data[idx].orig_ptr = p.callback;
-            } else {
-                info.hooks.insert(idx, {p.addr, t_bkp});
+            bool found = false;
+            for (size_t k = 0; k < info.hooks.size; k++) {
+                if (info.hooks.data[k].addr == p.addr) {
+                    info.hooks.data[k].orig_ptr = p.callback;
+                    found = true; break;
+                }
             }
+            if (!found) info.hooks.push_back({p.addr, t_bkp});
         }
         restore_page_prot();
         if (info.hooks.empty() && !info.self) { if (lsplt::sys::mremap((void*)info.backup, len, len, MREMAP_FIXED | MREMAP_MAYMOVE, (void*)info.start) != MAP_FAILED) info.backup = 0; else return false; }
         return res;
     }
 
+    __attribute__((noinline))
     bool RestoreFunction(FastList<HookRequest> &reg_info) {
         if (reg_info.empty()) return true;
-        ::sort(reg_info.begin(), reg_info.end(), [](const auto& a, const auto& b) { 
-            return reinterpret_cast<uintptr_t>(a.callback) < reinterpret_cast<uintptr_t>(b.callback);
-        });
-        
         FastList<PendingPatch> patches; bool res = true;
-        for (size_t i = data.size; i > 0; --i) {
-            auto& hi = data.data[i - 1];
+        
+        for (size_t i = 0; i < data.size; i++) {
+            auto& hi = data.data[i];
             if (hi.hooks.empty()) continue; 
             patches.clear();
             for (size_t j = 0; j < hi.hooks.size; j++) {
                 const auto& h = hi.hooks.data[j];
-                size_t req_idx = ::lower_bound(reg_info.data, reg_info.size, h.orig_ptr, [](const HookRequest& r, uintptr_t val) { 
-                    return (uintptr_t)r.callback < val; 
-                });
-                
-                while (req_idx < reg_info.size && (uintptr_t)reg_info.data[req_idx].callback == h.orig_ptr) {
-                    auto& req = reg_info.data[req_idx];
-                    if (req.symbol[0] != '\0' && hi.dev == req.dev && hi.inode == req.inode) { 
+                for (size_t k = 0; k < reg_info.size; k++) {
+                    auto& req = reg_info.data[k];
+                    if (req.symbol[0] != '\0' && (uintptr_t)req.callback == h.orig_ptr && hi.dev == req.dev && hi.inode == req.inode) { 
                         patches.push_back({h.addr, h.orig_ptr, nullptr}); 
                         req.symbol[0] = '\0'; 
                     }
-                    req_idx++;
                 }
             }
             if (!patches.empty()) {
                 res = BatchPatchPLTEntries(hi, patches) && res;
                 size_t new_hooks = 0;
                 for (size_t k = 0; k < hi.hooks.size; k++) {
-                    if (hi.hooks.data[k].orig_ptr != 0) {
-                        hi.hooks.data[new_hooks++] = hi.hooks.data[k];
+                    bool removed = false;
+                    for (size_t p = 0; p < patches.size; p++) {
+                        if (hi.hooks.data[k].addr == patches.data[p].addr) { removed = true; break; }
                     }
+                    if (!removed) hi.hooks.data[new_hooks++] = hi.hooks.data[k];
                 }
                 hi.hooks.size = new_hooks;
             }
@@ -383,52 +253,65 @@ public:
         return res;
     }
 
+    __attribute__((noinline))
     bool ProcessRequest(FastList<HookRequest> &reg_info) {
         bool res = true; 
         Elf::AddrList p_addr; 
-        ::sort(reg_info.begin(), reg_info.end(), [](const auto& a, const auto& b) {
-            if (a.dev != b.dev) return a.dev < b.dev;
-            if (a.inode != b.inode) return a.inode < b.inode;
-            return a.offset_range_start < b.offset_range_start;
-        });
-        HookInfo* last = nullptr; 
-        static FastList<FastList<PendingPatch>> grouped;
-        if (grouped.capacity < data.size) grouped.reserve(data.size);
-        grouped.size = data.size;
-        for (size_t i = 0; i < grouped.size; i++) grouped.data[i].clear();
-        size_t new_reg = 0;
-        for (size_t i = 0; i < reg_info.size; i++) {
-            auto& reg = reg_info.data[i];
-            bool remove = false;
-            if (!last || last->offset != reg.offset_range_start || !last->Match(reg)) {
-                last = nullptr; 
-                for (size_t j = 0; j < data.size; j++) {
-                    if (data.data[j].offset == reg.offset_range_start && data.data[j].Match(reg)) { last = &data.data[j]; break; }
-                }
+
+        // Step 1: Locate and initialize the ELF headers of the libraries 
+        // so that symbol lookup is ready.
+        for (size_t i = 0; i < data.size; i++) {
+            if (!data.data[i].elf) {
+                // It will only be valid if the segment actually starts with an ELF header
+                data.data[i].elf = new Elf(data.data[i].start);
             }
-            if (last) {
-                if (!last->elf) last->elf = new Elf(last->start);
-                if (last->elf->Valid()) {
-                    last->elf->FindPltAddr(reg.symbol, p_addr);
-                    if (p_addr.size == 0) res = false;
-                    else {
-                        for (size_t p = 0; p < p_addr.size; p++) {
-                            uintptr_t a = p_addr.data[p];
-                            size_t t_idx = ::upper_bound(data.data, data.size, a, [](uintptr_t v, const HookInfo& hi) { return v < hi.start; });
-                            if (t_idx > 0 && a < data.data[t_idx - 1].end) {
-                                grouped.data[t_idx - 1].push_back({a, (uintptr_t)reg.callback, (uintptr_t*)reg.backup});
-                            } else res = false;
+        }
+
+        // Step 2: We iterate each memory segment and check if any of 
+        // the requested PLT addresses physically fall within it.
+        for (size_t i = 0; i < data.size; i++) {
+            auto& hi = data.data[i];
+            FastList<PendingPatch> patches;
+
+            for (size_t j = 0; j < reg_info.size; j++) {
+                auto& reg = reg_info.data[j];
+                if (hi.Match(reg)) {
+                    // Since an ELF is split into several segments, we look for
+                    // what is the "base segment" that has the live ELF parser.
+                    HookInfo* base_hi = nullptr;
+                    for (size_t k = 0; k < data.size; k++) {
+                        if (data.data[k].Match(reg) && data.data[k].elf && data.data[k].elf->Valid()) {
+                            base_hi = &data.data[k];
+                            break;
                         }
                     }
+
+                    if (base_hi) {
+                        base_hi->elf->FindPltAddr(reg.symbol, p_addr);
+                        if (p_addr.size == 0) res = false;
+                        else {
+                            for (size_t p = 0; p < p_addr.size; p++) {
+                                uintptr_t a = p_addr.data[p];
+                                // If the address of the PLT instruction is 
+                                // within the memory range of THIS specific segment:
+                                if (a >= hi.start && a < hi.end) {
+                                    patches.push_back({a, (uintptr_t)reg.callback, (uintptr_t*)reg.backup});
+                                }
+                            }
+                        }
+                    } else {
+                        res = false;
+                    }
                 }
-                remove = true;
             }
-            if (!remove) reg_info.data[new_reg++] = reg_info.data[i];
+
+            // If this specific segment needed a patch, we applied it.
+            if (!patches.empty()) {
+                res = BatchPatchPLTEntries(hi, patches) && res;
+            }
         }
-        reg_info.size = new_reg;
-        for (size_t i = 0; i < data.size; ++i) {
-            if (!grouped.data[i].empty()) res = BatchPatchPLTEntries(data.data[i], grouped.data[i]) && res;
-        }
+
+        reg_info.clear();
         return res;
     }
 };
@@ -440,8 +323,8 @@ struct MutexGuard {
     ~MutexGuard() { pthread_mutex_unlock(m); }
 };
 
-FastList<HookRequest> g_pend; 
-HookInfos g_state;
+static FastList<HookRequest>* g_pend = nullptr; 
+static HookInfos* g_state = nullptr;
 
 } // anonymous namespace
 
@@ -486,40 +369,40 @@ static int DlIterateCallback(struct dl_phdr_info *info, size_t, void *data) {
 }
 
 MapInfoList Scan() {
-    MapInfoList info; 
-    DlIterateData d; d.info = &info; d.c_path[0] = '\0'; d.c_ok = d.exe_ok = false;
-    dl_iterate_phdr(DlIterateCallback, &d); return info;
+    MapInfoList info; DlIterateData d; 
+    d.info = &info; d.c_path[0] = '\0'; d.c_ok = d.exe_ok = false;
+    dl_iterate_phdr(DlIterateCallback, &d);
+    return info;
 }
 
 bool RegisterHook(dev_t d, ino_t i, const char* s, void *c, void **b) {
     if (d == 0 || i == 0 || !s || s[0] == '\0' || !c) return false;
-    const MutexGuard lock(&g_mtx); 
-    HookRequest& r = g_pend.emplace_back();
+    const MutexGuard lock(&g_mtx);
+    if (!g_pend) g_pend = new FastList<HookRequest>();
+    HookRequest r;
     r.dev = d;
     r.inode = i;
-    r.offset_range_start = 0;
-    r.offset_range_end = (uintptr_t)-1;
     size_t l = MIN_VAL(__builtin_strlen(s), sizeof(r.symbol) - 1); 
     __builtin_memcpy(r.symbol, s, l); 
     r.symbol[l] = '\0';
     r.callback = c;
     r.backup = b;
+    g_pend->push_back(r);
     return true;
 }
 
 bool CommitHook(MapInfoList &m, bool u) {
-    const MutexGuard lock(&g_mtx); 
-    if (g_pend.empty()) return true;
+    const MutexGuard lock(&g_mtx);
+    if (!g_pend || g_pend->empty()) return true;
     auto n = HookInfos::CreateTargetsFromMemoryMaps(m); 
     if (n.data.empty()) return false;
-    n.Filter(g_pend); 
-    n.Merge(g_state); 
-    g_state = static_cast<HookInfos&&>(n);
-    if (u && g_state.RestoreFunction(g_pend)) return true;
-    return g_state.ProcessRequest(g_pend);
+    n.Filter(*g_pend);
+    if (!g_state) g_state = new HookInfos();
+    n.Merge(*g_state); 
+    *g_state = static_cast<HookInfos&&>(n);
+    if (u && g_state->RestoreFunction(*g_pend)) return true;
+    return g_state->ProcessRequest(*g_pend);
 }
-
-bool CommitHook() { auto m = Scan(); return CommitHook(m, false); }
 
 } // namespace v2
 } // namespace lsplt
