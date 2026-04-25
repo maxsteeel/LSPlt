@@ -162,9 +162,9 @@ public:
                 __builtin___clear_cache((char*)bkp, (char*)bkp + len);
             }
             int fd = lsplt::sys::call<int>(SYS_openat, AT_FDCWD, (long)info.path, O_RDONLY | O_CLOEXEC);
-            void *nw = (fd >= 0) ? lsplt::sys::mmap(reinterpret_cast<void*>(info.start), len, PROT_READ|PROT_WRITE|info.perms, MAP_PRIVATE|MAP_FIXED, fd, info.offset) : MAP_FAILED;
+            void *nw = (fd >= 0) ? lsplt::sys::mmap(reinterpret_cast<void*>(info.start), len, (info.perms & ~PROT_EXEC) | PROT_READ | PROT_WRITE, MAP_PRIVATE|MAP_FIXED, fd, info.offset) : MAP_FAILED;
             if (fd >= 0) lsplt::sys::call(SYS_close, fd);
-            if (nw == MAP_FAILED) nw = lsplt::sys::mmap(reinterpret_cast<void*>(info.start), len, PROT_READ|PROT_WRITE|info.perms, MAP_PRIVATE|MAP_FIXED|MAP_ANON, -1, 0);
+            if (nw == MAP_FAILED) nw = lsplt::sys::mmap(reinterpret_cast<void*>(info.start), len, (info.perms & ~PROT_EXEC) | PROT_READ | PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANON, -1, 0);
             if (nw == MAP_FAILED) return false;
             __builtin_memcpy(reinterpret_cast<void*>(info.start), bkp, len);
             lsplt::sys::mprotect(reinterpret_cast<void*>(info.start), len, info.perms);
@@ -188,7 +188,7 @@ public:
                 uintptr_t pg_s = (uintptr_t)PageStart(p.addr);
                 if (pg_s != cur_pg) {
                     restore_page_prot();
-                    if (lsplt::sys::mprotect((void*)pg_s, lsplt::sys::SysPageSize(), info.perms | PROT_WRITE) == 0) {
+                    if (lsplt::sys::mprotect((void*)pg_s, lsplt::sys::SysPageSize(), (info.perms & ~PROT_EXEC) | PROT_WRITE) == 0) {
                         cur_pg = pg_s; pg_unprot = true; clr_s = clr_e = 0;
                     } else { res = false; continue; }
                 }
