@@ -394,6 +394,8 @@ static int DlIterateCallback(struct dl_phdr_info *info, size_t, void *data) {
             }
         }
     }
+    const char* c_str = n ? n : "";
+    size_t c_len = __builtin_strlen(c_str);
     for (int i = 0; i < info->dlpi_phnum; i++) {
         if (info->dlpi_phdr[i].p_type == PT_LOAD) {
             MapInfo m; m.start = (info->dlpi_addr + info->dlpi_phdr[i].p_vaddr) & lsplt::sys::SysPageMask();
@@ -403,9 +405,8 @@ static int DlIterateCallback(struct dl_phdr_info *info, size_t, void *data) {
             if (info->dlpi_phdr[i].p_flags & PF_W) m.perms |= PROT_WRITE;
             if (info->dlpi_phdr[i].p_flags & PF_X) m.perms |= PROT_EXEC;
             m.is_private = true; m.dev = dev; m.inode = ino;
-            size_t c_len = __builtin_strlen(n ? n : "");
             if (c_len >= sizeof(m.path)) m.path[0] = '\0';
-            else { __builtin_memcpy(m.path, n ? n : "", c_len); m.path[c_len] = '\0'; }
+            else { __builtin_memcpy(m.path, c_str, c_len); m.path[c_len] = '\0'; }
             d->info->push_back(m);
         }
     }
