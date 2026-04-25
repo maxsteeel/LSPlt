@@ -256,7 +256,6 @@ public:
     __attribute__((noinline))
     bool ProcessRequest(FastList<HookRequest> &reg_info) {
         bool res = true; 
-        Elf::AddrList p_addr; 
 
         // Step 1: Locate and initialize the ELF headers of the libraries 
         // so that symbol lookup is ready.
@@ -267,7 +266,65 @@ public:
             }
         }
 
-        // Step 2: We iterate each memory segment and check if any of 
+        // Step 2: Pre-calculate the PLT addresses for each hook request.
+        struct CachedAddr {
+            Elf::AddrList p_addr;
+            bool found;
+
+            CachedAddr() : found(false) {}
+            ~CachedAddr() {
+                if (p_addr.data) {
+                    free(p_addr.data);
+                }
+            }
+            CachedAddr(const CachedAddr&) = delete;
+            CachedAddr& operator=(const CachedAddr&) = delete;
+            CachedAddr(CachedAddr&& o) noexcept : found(o.found) {
+                p_addr.data = o.p_addr.data;
+                p_addr.size = o.p_addr.size;
+                p_addr.capacity = o.p_addr.capacity;
+                o.p_addr.data = nullptr;
+                o.p_addr.size = o.p_addr.capacity = 0;
+            }
+            CachedAddr& operator=(CachedAddr&& o) noexcept {
+                if (this != &o) {
+                    if (p_addr.data) {
+                        free(p_addr.data);
+                    }
+                    p_addr.data = o.p_addr.data;
+                    p_addr.size = o.p_addr.size;
+                    p_addr.capacity = o.p_addr.capacity;
+                    found = o.found;
+                    o.p_addr.data = nullptr;
+                    o.p_addr.size = o.p_addr.capacity = 0;
+                }
+                return *this;
+            }
+        };
+        FastList<CachedAddr> cached_results;
+        cached_results.reserve(reg_info.size);
+
+        for (size_t j = 0; j < reg_info.size; j++) {
+            auto& reg = reg_info.data[j];
+            HookInfo* base_hi = nullptr;
+            for (size_t k = 0; k < data.size; k++) {
+                if (data.data[k].Match(reg) && data.data[k].elf && data.data[k].elf->Valid()) {
+                    base_hi = &data.data[k];
+                    break;
+                }
+            }
+
+            CachedAddr result;
+            if (base_hi) {
+                base_hi->elf->FindPltAddr(reg.symbol, result.p_addr);
+                if (result.p_addr.size > 0) {
+                    result.found = true;
+                }
+            }
+            cached_results.push_back(static_cast<CachedAddr&&>(result));
+        }
+
+        // Step 3: We iterate each memory segment and check if any of
         // the requested PLT addresses physically fall within it.
         for (size_t i = 0; i < data.size; i++) {
             auto& hi = data.data[i];
@@ -276,27 +333,14 @@ public:
             for (size_t j = 0; j < reg_info.size; j++) {
                 auto& reg = reg_info.data[j];
                 if (hi.Match(reg)) {
-                    // Since an ELF is split into several segments, we look for
-                    // what is the "base segment" that has the live ELF parser.
-                    HookInfo* base_hi = nullptr;
-                    for (size_t k = 0; k < data.size; k++) {
-                        if (data.data[k].Match(reg) && data.data[k].elf && data.data[k].elf->Valid()) {
-                            base_hi = &data.data[k];
-                            break;
-                        }
-                    }
-
-                    if (base_hi) {
-                        base_hi->elf->FindPltAddr(reg.symbol, p_addr);
-                        if (p_addr.size == 0) res = false;
-                        else {
-                            for (size_t p = 0; p < p_addr.size; p++) {
-                                uintptr_t a = p_addr.data[p];
-                                // If the address of the PLT instruction is 
-                                // within the memory range of THIS specific segment:
-                                if (a >= hi.start && a < hi.end) {
-                                    patches.push_back({a, (uintptr_t)reg.callback, (uintptr_t*)reg.backup});
-                                }
+                    auto& cached = cached_results.data[j];
+                    if (cached.found) {
+                        for (size_t p = 0; p < cached.p_addr.size; p++) {
+                            uintptr_t a = cached.p_addr.data[p];
+                            // If the address of the PLT instruction is
+                            // within the memory range of THIS specific segment:
+                            if (a >= hi.start && a < hi.end) {
+                                patches.push_back({a, (uintptr_t)reg.callback, (uintptr_t*)reg.backup});
                             }
                         }
                     } else {
