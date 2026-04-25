@@ -405,13 +405,30 @@ static int DlIterateCallback(struct dl_phdr_info *info, size_t, void *data) {
     }
     ino_t ino = 0; dev_t dev = 0;
     if (n && n[0] == '/') {
-        const char* ex = __builtin_strstr(n, "!/"); 
+        const char *ex = __builtin_strstr(n, "!/");
         size_t len = ex ? (size_t)(ex - n) : __builtin_strlen(n);
-        if (len < PATH_MAX) {
-            if (d->c_path[0] != '\0' && __builtin_strncmp(n, d->c_path, len) == 0 && d->c_path[len] == '\0') { if (d->c_ok) { ino = d->c_ino; dev = d->c_dev; } }
-            else {
-                char cn[PATH_MAX]; __builtin_memcpy(cn, n, len); cn[len] = '\0'; __builtin_memcpy(d->c_path, cn, len+1);
-                struct stat st; if (stat(cn, &st) == 0) { ino = st.st_ino; dev = st.st_dev; d->c_ino = ino; d->c_dev = dev; d->c_ok = true; } else d->c_ok = false;
+        if (len < sizeof(d->c_path)) {
+            if (d->c_path[0] != '\0' && __builtin_strncmp(n, d->c_path, len) == 0 && d->c_path[len] == '\0') {
+                if (d->c_ok) {
+                    ino = d->c_ino;
+                    dev = d->c_dev;
+                }
+            } else {
+                char cn[PATH_MAX];
+                size_t c_len = MIN_VAL(len, sizeof(cn) - 1);
+                __builtin_memcpy(cn, n, c_len);
+                cn[c_len] = '\0';
+                __builtin_memcpy(d->c_path, cn, c_len + 1);
+                struct stat st;
+                if (stat(cn, &st) == 0) {
+                    ino = st.st_ino;
+                    dev = st.st_dev;
+                    d->c_ino = ino;
+                    d->c_dev = dev;
+                    d->c_ok = true;
+                } else {
+                    d->c_ok = false;
+                }
             }
         }
     }
