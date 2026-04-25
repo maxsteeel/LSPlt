@@ -213,15 +213,45 @@ public:
         return res;
     }
 
+
+    template <typename MatchLogic>
     __attribute__((noinline))
-    bool RestoreFunction(FastList<HookRequest> &reg_info) {
-        if (reg_info.empty()) return true;
-        FastList<PendingPatch> patches; bool res = true;
+    bool ApplyPatches(MatchLogic match_logic, bool is_restore = false) {
+        bool res = true;
+        FastList<PendingPatch> patches;
         
         for (size_t i = 0; i < data.size; i++) {
             auto& hi = data.data[i];
-            if (hi.hooks.empty()) continue; 
             patches.clear();
+
+            // match_logic returns false if an error occurred during matching
+            if (!match_logic(hi, patches, i)) {
+                res = false;
+            }
+
+            if (!patches.empty()) {
+                res = BatchPatchPLTEntries(hi, patches) && res;
+                if (is_restore) {
+                    size_t new_hooks = 0;
+                    for (size_t k = 0; k < hi.hooks.size; k++) {
+                        bool removed = false;
+                        for (size_t p = 0; p < patches.size; p++) {
+                            if (hi.hooks.data[k].addr == patches.data[p].addr) { removed = true; break; }
+                        }
+                        if (!removed) hi.hooks.data[new_hooks++] = hi.hooks.data[k];
+                    }
+                    hi.hooks.size = new_hooks;
+                }
+            }
+        }
+        return res;
+    }
+
+    __attribute__((noinline))
+    bool RestoreFunction(FastList<HookRequest> &reg_info) {
+        if (reg_info.empty()) return true;
+        bool res = ApplyPatches([&](HookInfo& hi, FastList<PendingPatch>& patches, size_t) {
+            if (hi.hooks.empty()) return true;
             for (size_t j = 0; j < hi.hooks.size; j++) {
                 const auto& h = hi.hooks.data[j];
                 for (size_t k = 0; k < reg_info.size; k++) {
@@ -232,19 +262,9 @@ public:
                     }
                 }
             }
-            if (!patches.empty()) {
-                res = BatchPatchPLTEntries(hi, patches) && res;
-                size_t new_hooks = 0;
-                for (size_t k = 0; k < hi.hooks.size; k++) {
-                    bool removed = false;
-                    for (size_t p = 0; p < patches.size; p++) {
-                        if (hi.hooks.data[k].addr == patches.data[p].addr) { removed = true; break; }
-                    }
-                    if (!removed) hi.hooks.data[new_hooks++] = hi.hooks.data[k];
-                }
-                hi.hooks.size = new_hooks;
-            }
-        }
+            return true;
+        }, true);
+
         size_t new_reg = 0;
         for (size_t k = 0; k < reg_info.size; k++) {
             if (reg_info.data[k].symbol[0] != '\0') reg_info.data[new_reg++] = reg_info.data[k];
@@ -255,8 +275,6 @@ public:
 
     __attribute__((noinline))
     bool ProcessRequest(FastList<HookRequest> &reg_info) {
-        bool res = true; 
-
         // Step 1: Locate and initialize the ELF headers of the libraries 
         // so that symbol lookup is ready.
         for (size_t i = 0; i < data.size; i++) {
@@ -326,10 +344,8 @@ public:
 
         // Step 3: We iterate each memory segment and check if any of
         // the requested PLT addresses physically fall within it.
-        for (size_t i = 0; i < data.size; i++) {
-            auto& hi = data.data[i];
-            FastList<PendingPatch> patches;
-
+        bool res = ApplyPatches([&](HookInfo& hi, FastList<PendingPatch>& patches, size_t i) {
+            bool ok = true;
             for (size_t j = 0; j < reg_info.size; j++) {
                 auto& reg = reg_info.data[j];
                 if (hi.Match(reg)) {
@@ -344,16 +360,12 @@ public:
                             }
                         }
                     } else {
-                        res = false;
+                        ok = false;
                     }
                 }
             }
-
-            // If this specific segment needed a patch, we applied it.
-            if (!patches.empty()) {
-                res = BatchPatchPLTEntries(hi, patches) && res;
-            }
-        }
+            return ok;
+        });
 
         reg_info.clear();
         return res;
