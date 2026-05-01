@@ -261,13 +261,16 @@ public:
         if (reg_info.empty()) return true;
         bool res = ApplyPatches([&](HookInfo& hi, FastList<PendingPatch>& patches, size_t) {
             if (hi.hooks.empty()) return true;
-            for (size_t j = 0; j < hi.hooks.size; j++) {
-                const auto& h = hi.hooks.data[j];
-                for (size_t k = 0; k < reg_info.size; k++) {
-                    auto& req = reg_info.data[k];
-                    if (req.symbol[0] != '\0' && (uintptr_t)req.callback == h.orig_ptr && hi.dev == req.dev && hi.inode == req.inode) { 
-                        patches.push_back({h.addr, h.orig_ptr, nullptr}); 
-                        req.symbol[0] = '\0'; 
+            for (size_t k = 0; k < reg_info.size; k++) {
+                auto& req = reg_info.data[k];
+                if (req.symbol[0] != '\0' && hi.dev == req.dev && hi.inode == req.inode) {
+                    for (size_t j = 0; j < hi.hooks.size; j++) {
+                        const auto& h = hi.hooks.data[j];
+                        if ((uintptr_t)req.callback == h.orig_ptr) {
+                            patches.push_back({h.addr, h.orig_ptr, nullptr});
+                            req.symbol[0] = '\0';
+                            break;
+                        }
                     }
                 }
             }
