@@ -99,22 +99,25 @@ public:
     static auto CreateTargetsFromMemoryMaps(lsplt::MapInfoList &maps) {
         static ino_t kSelfInode = 0; static dev_t kSelfDev = 0;
         HookInfos info; info.data.reserve(maps.size);
+
+        auto process_maps = [&](bool find_self) __attribute__((always_inline)) {
+            const uintptr_t self_addr = find_self ? reinterpret_cast<uintptr_t>(__builtin_return_address(0)) : 0;
+            for (size_t i = 0; i < maps.size; i++) {
+                auto& map = maps.data[i];
+                if (find_self && kSelfInode == 0 && self_addr >= map.start && self_addr < map.end) {
+                    kSelfInode = map.inode; kSelfDev = map.dev;
+                }
+                if (map.inode == 0 || !map.is_private || !(map.perms & PROT_READ) || map.path[0] == '\0' || map.path[0] == '[') continue;
+                bool is_self = find_self ? (kSelfInode != 0 && map.inode == kSelfInode && map.dev == kSelfDev) : (map.inode == kSelfInode && map.dev == kSelfDev);
+                HookInfo hi(map, is_self);
+                info.data.push_back(static_cast<HookInfo&&>(hi));
+            }
+        };
+
         if (__builtin_expect(kSelfInode == 0, 0)) {
-            const uintptr_t self_addr = reinterpret_cast<uintptr_t>(__builtin_return_address(0));
-            for (size_t i = 0; i < maps.size; i++) {
-                auto& map = maps.data[i];
-                if (kSelfInode == 0 && self_addr >= map.start && self_addr < map.end) { kSelfInode = map.inode; kSelfDev = map.dev; }
-                if (map.inode == 0 || !map.is_private || !(map.perms & PROT_READ) || map.path[0] == '\0' || map.path[0] == '[') continue;
-                HookInfo hi(map, (kSelfInode != 0 && map.inode == kSelfInode && map.dev == kSelfDev));
-                info.data.push_back(static_cast<HookInfo&&>(hi));
-            }
+            process_maps(true);
         } else {
-            for (size_t i = 0; i < maps.size; i++) {
-                auto& map = maps.data[i];
-                if (map.inode == 0 || !map.is_private || !(map.perms & PROT_READ) || map.path[0] == '\0' || map.path[0] == '[') continue;
-                HookInfo hi(map, (map.inode == kSelfInode && map.dev == kSelfDev));
-                info.data.push_back(static_cast<HookInfo&&>(hi));
-            }
+            process_maps(false);
         }
         return info;
     }
