@@ -2,6 +2,7 @@
 
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -46,6 +47,10 @@ inline void* mmap(void* a, size_t l, int p, int f, int d, off_t o) {
 #else
     return call<void*>(__NR_mmap, (long)a, (long)l, (long)p, (long)f, (long)d, (long)o);
 #endif
+}
+
+inline int munmap(void* a, size_t l) {
+    return (int)call(__NR_munmap, (long)a, (long)l);
 }
 
 inline int mprotect(void* a, size_t l, int p) {

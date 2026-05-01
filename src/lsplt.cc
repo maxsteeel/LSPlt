@@ -164,7 +164,10 @@ public:
             void *bkp = lsplt::sys::mmap(nullptr, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
             if (bkp == MAP_FAILED) return false;
             if (lsplt::sys::mremap(reinterpret_cast<void *>(info.start), len, len, MREMAP_FIXED | MREMAP_MAYMOVE | MREMAP_DONTUNMAP, bkp) == MAP_FAILED) {
-                if (lsplt::sys::mprotect(bkp, len, PROT_READ|PROT_WRITE) != 0 || lsplt::sys::mprotect(reinterpret_cast<void*>(info.start), len, info.perms|PROT_READ) != 0) return false;
+                if (lsplt::sys::mprotect(bkp, len, PROT_READ|PROT_WRITE) != 0 || lsplt::sys::mprotect(reinterpret_cast<void*>(info.start), len, info.perms|PROT_READ) != 0) {
+                    lsplt::sys::munmap(bkp, len);
+                    return false;
+                }
                 __builtin_memcpy(bkp, reinterpret_cast<void*>(info.start), len);
                 lsplt::sys::mprotect(reinterpret_cast<void*>(info.start), len, info.perms);
                 lsplt::sys::mprotect(bkp, len, info.perms);
@@ -174,7 +177,10 @@ public:
             void *nw = (fd >= 0) ? lsplt::sys::mmap(reinterpret_cast<void*>(info.start), len, (info.perms & ~PROT_EXEC) | PROT_READ | PROT_WRITE, MAP_PRIVATE|MAP_FIXED, fd, info.offset) : MAP_FAILED;
             if (fd >= 0) lsplt::sys::call(SYS_close, fd);
             if (nw == MAP_FAILED) nw = lsplt::sys::mmap(reinterpret_cast<void*>(info.start), len, (info.perms & ~PROT_EXEC) | PROT_READ | PROT_WRITE, MAP_PRIVATE|MAP_FIXED|MAP_ANON, -1, 0);
-            if (nw == MAP_FAILED) return false;
+            if (nw == MAP_FAILED) {
+                lsplt::sys::munmap(bkp, len);
+                return false;
+            }
             __builtin_memcpy(reinterpret_cast<void*>(info.start), bkp, len);
             lsplt::sys::mprotect(reinterpret_cast<void*>(info.start), len, info.perms);
             info.backup = (uintptr_t)bkp;
