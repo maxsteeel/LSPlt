@@ -6,7 +6,10 @@
 #include <stdlib.h>
 
 static void* memalloc(void* old_data, size_t old_size, size_t new_cap, size_t elem_size, bool reserve) {
-    void* new_data = malloc(new_cap * elem_size);
+    if (old_size > new_cap) return nullptr;
+    size_t alloc_size;
+    if (__builtin_mul_overflow(new_cap, elem_size, &alloc_size)) return nullptr;
+    void* new_data = malloc(alloc_size);
     if (!new_data) return nullptr;
     if (old_data && old_size > 0) __builtin_memcpy(new_data, old_data, old_size * elem_size);
     if (reserve) __builtin_memset(reinterpret_cast<char*>(new_data) + (old_size * elem_size), 0, (new_cap - old_size) * elem_size);
