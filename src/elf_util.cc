@@ -91,14 +91,6 @@ bool Elf::ParseDynamicTable() {
             case DT_PLTRELSZ: rel_plt_size_ = d->d_un.d_val; break;
             case DT_REL: case DT_RELA: rel_dyn_ = val; break;
             case DT_RELSZ: case DT_RELASZ: rel_dyn_size_ = d->d_un.d_val; break;
-            case DT_HASH: sysv_hash_ = reinterpret_cast<uint32_t*>(val); break;
-            case DT_GNU_HASH: { 
-                auto* r = reinterpret_cast<ElfW(Word)*>(val); 
-                bucket_count_ = r[0]; sym_offset_ = r[1]; bloom_size_ = r[2]; bloom_shift_ = r[3];
-                bloom_ = reinterpret_cast<ElfW(Addr)*>(r + 4); 
-                bucket_ = reinterpret_cast<uint32_t*>(bloom_ + bloom_size_); 
-                chain_ = bucket_ + bucket_count_ - sym_offset_; 
-            } break;
         }
     }
     return dyn_str_ && dyn_sym_;
@@ -130,58 +122,20 @@ void Elf::BuildRelocIndex() {
 }
 
 __attribute__((noinline))
-uint32_t Elf::GnuLookup(const SymName& name) const {
-    if (!bloom_) return 0;
-    constexpr uint32_t ADDR_BITS = sizeof(ElfW(Addr)) * 8;
-    constexpr uint32_t ADDR_MASK = ADDR_BITS - 1;
-
-    uint32_t word_num = (name.gnu_hash / ADDR_BITS) & (bloom_size_ - 1);
-    uint32_t h2 = name.gnu_hash >> bloom_shift_;
-
-    ElfW(Addr) mask = (((ElfW(Addr))1) << (name.gnu_hash & ADDR_MASK)) |
-                      (((ElfW(Addr))1) << (h2 & ADDR_MASK));
-
-    // Fast-Reject via Bloom Filter
-    if ((bloom_[word_num] & mask) != mask) return 0;
-
-    for (uint32_t i = bucket_[name.gnu_hash % bucket_count_]; i >= sym_offset_ && i != 0; ++i) {
-        if (((chain_[i] ^ name.gnu_hash) >> 1) == 0 && MatchSym(name, dyn_str_ + dyn_sym_[i].st_name)) return i;
-        if (chain_[i] & 1) break;
-    }
-    return 0;
-}
-
-__attribute__((noinline))
-uint32_t Elf::SysVLookup(const SymName& name) const {
-    if (!sysv_hash_) return 0;
-    uint32_t nbucket = sysv_hash_[0];
-    uint32_t* bucket = sysv_hash_ + 2;
-    uint32_t* chain = bucket + nbucket;
-
-    for (uint32_t i = bucket[name.sysv_hash % nbucket]; i != 0; i = chain[i]) {
-        if (MatchSym(name, dyn_str_ + dyn_sym_[i].st_name)) return i;
-    }
-    return 0;
-}
-
-__attribute__((noinline))
 void Elf::FindPltAddr(const char* name, AddrList& res) const {
     res.clear(); 
     SymName sn(name);
-    
-    // Priority: DT_GNU_HASH -> DT_HASH
-    uint32_t idx = GnuLookup(sn);
-    if (!idx) idx = SysVLookup(sn);
-    if (!idx) return;
 
     for (size_t i = 0; i < plt_relocs_.size; i++) {
-        if (plt_relocs_.data[i].sym == idx) {
+        uint32_t sym_idx = plt_relocs_.data[i].sym;
+        if (MatchSym(sn, dyn_str_ + dyn_sym_[sym_idx].st_name)) {
             res.push_back(plt_relocs_.data[i].addr);
-            break;
         }
     }
+    
     for (size_t i = 0; i < dyn_relocs_.size; i++) {
-        if (dyn_relocs_.data[i].sym == idx) {
+        uint32_t sym_idx = dyn_relocs_.data[i].sym;
+        if (MatchSym(sn, dyn_str_ + dyn_sym_[sym_idx].st_name)) {
             res.push_back(dyn_relocs_.data[i].addr);
         }
     }
