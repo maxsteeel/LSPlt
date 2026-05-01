@@ -67,10 +67,16 @@ bool Elf::ParseHeader() {
 
 __attribute__((noinline))
 bool Elf::ParseDynamicTable() {
-    auto* phdr = reinterpret_cast<ElfW(Phdr)*>(base_addr_ + header_->e_phoff);
-    for (int i = 0; i < header_->e_phnum; i++) {
-        if (phdr[i].p_type == PT_LOAD && phdr[i].p_offset == 0) bias_addr_ = base_addr_ - phdr[i].p_vaddr;
-        else if (phdr[i].p_type == PT_DYNAMIC) { dynamic_ = reinterpret_cast<ElfW(Dyn)*>(phdr[i].p_vaddr); dynamic_size_ = phdr[i].p_memsz; }
+    program_header_ = reinterpret_cast<ElfW(Phdr)*>(base_addr_ + header_->e_phoff);
+    phnum_ = header_->e_phnum;
+    
+    for (int i = 0; i < phnum_; i++) {
+        if (program_header_[i].p_type == PT_LOAD && program_header_[i].p_offset == 0) {
+            bias_addr_ = base_addr_ - program_header_[i].p_vaddr;
+        } else if (program_header_[i].p_type == PT_DYNAMIC) { 
+            dynamic_ = reinterpret_cast<ElfW(Dyn)*>(program_header_[i].p_vaddr); 
+            dynamic_size_ = program_header_[i].p_memsz; 
+        }
     }
     if (!dynamic_ || !bias_addr_) return false;
     dynamic_ = reinterpret_cast<ElfW(Dyn)*>(bias_addr_ + reinterpret_cast<uintptr_t>(dynamic_));
@@ -85,8 +91,14 @@ bool Elf::ParseDynamicTable() {
             case DT_PLTRELSZ: rel_plt_size_ = d->d_un.d_val; break;
             case DT_REL: case DT_RELA: rel_dyn_ = val; break;
             case DT_RELSZ: case DT_RELASZ: rel_dyn_size_ = d->d_un.d_val; break;
-            case DT_GNU_HASH: { auto* r = reinterpret_cast<ElfW(Word)*>(val); bucket_count_ = r[0]; sym_offset_ = r[1]; bloom_size_ = r[2]; bloom_shift_ = r[3];
-                bloom_ = reinterpret_cast<ElfW(Addr)*>(r + 4); bucket_ = reinterpret_cast<uint32_t*>(bloom_ + bloom_size_); chain_ = bucket_ + bucket_count_ - sym_offset_; } break;
+            case DT_HASH: sysv_hash_ = reinterpret_cast<uint32_t*>(val); break;
+            case DT_GNU_HASH: { 
+                auto* r = reinterpret_cast<ElfW(Word)*>(val); 
+                bucket_count_ = r[0]; sym_offset_ = r[1]; bloom_size_ = r[2]; bloom_shift_ = r[3];
+                bloom_ = reinterpret_cast<ElfW(Addr)*>(r + 4); 
+                bucket_ = reinterpret_cast<uint32_t*>(bloom_ + bloom_size_); 
+                chain_ = bucket_ + bucket_count_ - sym_offset_; 
+            } break;
         }
     }
     return dyn_str_ && dyn_sym_;
@@ -129,6 +141,7 @@ uint32_t Elf::GnuLookup(const SymName& name) const {
     ElfW(Addr) mask = (((ElfW(Addr))1) << (name.gnu_hash & ADDR_MASK)) |
                       (((ElfW(Addr))1) << (h2 & ADDR_MASK));
 
+    // Fast-Reject via Bloom Filter
     if ((bloom_[word_num] & mask) != mask) return 0;
 
     for (uint32_t i = bucket_[name.gnu_hash % bucket_count_]; i >= sym_offset_ && i != 0; ++i) {
@@ -138,9 +151,16 @@ uint32_t Elf::GnuLookup(const SymName& name) const {
     return 0;
 }
 
-uint32_t Elf::LinearLookup(const SymName& name) const {
-    for (uint32_t i = 0; i < sym_offset_; i++)
+__attribute__((noinline))
+uint32_t Elf::SysVLookup(const SymName& name) const {
+    if (!sysv_hash_) return 0;
+    uint32_t nbucket = sysv_hash_[0];
+    uint32_t* bucket = sysv_hash_ + 2;
+    uint32_t* chain = bucket + nbucket;
+
+    for (uint32_t i = bucket[name.sysv_hash % nbucket]; i != 0; i = chain[i]) {
         if (MatchSym(name, dyn_str_ + dyn_sym_[i].st_name)) return i;
+    }
     return 0;
 }
 
@@ -148,8 +168,10 @@ __attribute__((noinline))
 void Elf::FindPltAddr(const char* name, AddrList& res) const {
     res.clear(); 
     SymName sn(name);
+    
+    // Priority: DT_GNU_HASH -> DT_HASH
     uint32_t idx = GnuLookup(sn);
-    if (!idx) idx = LinearLookup(sn);
+    if (!idx) idx = SysVLookup(sn);
     if (!idx) return;
 
     for (size_t i = 0; i < plt_relocs_.size; i++) {
@@ -163,4 +185,41 @@ void Elf::FindPltAddr(const char* name, AddrList& res) const {
             res.push_back(dyn_relocs_.data[i].addr);
         }
     }
+}
+
+__attribute__((noinline))
+int Elf::GetExactProtection(uintptr_t addr) const {
+    int prot = 0;
+    bool found = false;
+    
+    // 1. Resolve base permissions from PT_LOAD segments
+    for (size_t i = 0; i < phnum_; i++) {
+        const auto* ph = &program_header_[i];
+        if (ph->p_type != PT_LOAD || ph->p_memsz == 0) continue;
+        
+        uintptr_t seg_start = bias_addr_ + ph->p_vaddr;
+        uintptr_t seg_end = seg_start + ph->p_memsz;
+        if (addr >= seg_start && addr < seg_end) {
+            if (ph->p_flags & PF_R) prot |= PROT_READ;
+            if (ph->p_flags & PF_W) prot |= PROT_WRITE;
+            if (ph->p_flags & PF_X) prot |= PROT_EXEC;
+            found = true;
+            break;
+        }
+    }
+    if (!found || prot == 0) return -1;
+
+    // 2. Apply security hardening: PT_GNU_RELRO
+    for (size_t i = 0; i < phnum_; i++) {
+        const auto* ph = &program_header_[i];
+        if (ph->p_type != 0x6474e552 /* PT_GNU_RELRO */ || ph->p_memsz == 0) continue;
+        
+        uintptr_t relro_start = bias_addr_ + ph->p_vaddr;
+        uintptr_t relro_end = relro_start + ph->p_memsz;
+        if (addr >= relro_start && addr < relro_end) {
+            prot &= ~PROT_WRITE;
+            break;
+        }
+    }
+    return prot;
 }

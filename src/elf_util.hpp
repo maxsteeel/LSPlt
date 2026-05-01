@@ -8,11 +8,24 @@ struct SymName {
     const char* name;
     size_t len;
     uint32_t gnu_hash = 5381;
+    uint32_t sysv_hash = 0; // Added for SysV Hash fallback
 
     explicit SymName(const char* n) : name(n) {
         len = 0;
         for (const char* ptr = n; *ptr != '\0'; ++ptr) {
-            gnu_hash = (gnu_hash << 5) + gnu_hash + *ptr;
+            // INFO: Cast to uint8_t is mandatory to prevent negative overflow
+            // if the compiler treats 'char' as signed.
+            uint32_t c = (uint32_t)(uint8_t)(*ptr);
+            
+            // Calculate GNU Hash
+            gnu_hash = (gnu_hash << 5) + gnu_hash + c;
+            
+            // Calculate SysV Hash (Fallback)
+            sysv_hash = (sysv_hash << 4) + c;
+            uint32_t g = sysv_hash & 0xf0000000;
+            if (g) sysv_hash ^= g >> 24;
+            sysv_hash &= ~g;
+            
             len++;
         }
     }
@@ -32,14 +45,14 @@ class Elf {
         RelocList& operator=(const RelocList&) = delete;
         void reserve(size_t n) {
             if (n > capacity) {
-                void* nd = memalloc(data, size, n, sizeof(Reloc), true);
+                void* nd = memalloc(data, size, n, sizeof(Reloc));
                 if (nd) { data = static_cast<Reloc*>(nd); capacity = n; }
             }
         }
         void push_back(Reloc r) {
             if (size >= capacity) {
                 size_t n = capacity == 0 ? 64 : capacity * 2;
-                void* nd = memalloc(data, size, n, sizeof(Reloc), false);
+                void* nd = memalloc(data, size, n, sizeof(Reloc));
                 if (nd) { data = static_cast<Reloc*>(nd); capacity = n; }
                 else return;
             }
@@ -60,7 +73,7 @@ public:
         void push_back(uintptr_t addr) {
             if (size >= capacity) {
                 size_t n = capacity == 0 ? 4 : capacity * 2;
-                void* nd = memalloc(data, size, n, sizeof(uintptr_t), false);
+                void* nd = memalloc(data, size, n, sizeof(uintptr_t));
                 if (nd) { data = static_cast<uintptr_t*>(nd); capacity = n; }
                 else return;
             }
@@ -73,6 +86,9 @@ public:
 private:
     ElfW(Addr) base_addr_ = 0, bias_addr_ = 0;
     ElfW(Ehdr) *header_ = nullptr;
+    ElfW(Phdr) *program_header_ = nullptr;
+    uint16_t phnum_ = 0;
+    
     ElfW(Dyn)  *dynamic_ = nullptr;
     ElfW(Sym)  *dyn_sym_ = nullptr;
     const char *dyn_str_ = nullptr;
@@ -80,9 +96,13 @@ private:
     ElfW(Addr) rel_plt_ = 0, rel_dyn_ = 0;
     ElfW(Word) rel_plt_size_ = 0, rel_dyn_size_ = 0, dynamic_size_ = 0;
 
+    // GNU Hash specific
     uint32_t *bucket_ = nullptr, *chain_ = nullptr, bucket_count_ = 0, sym_offset_ = 0;
     ElfW(Addr) *bloom_ = nullptr;
     uint32_t bloom_size_ = 0, bloom_shift_ = 0;
+
+    // SysV Hash specific (Fallback)
+    uint32_t *sysv_hash_ = nullptr;
 
     bool is_use_rela_ = false, valid_ = false;
     RelocList plt_relocs_, dyn_relocs_;
@@ -92,10 +112,11 @@ private:
     bool ParseHeader();
     bool ParseDynamicTable();
     uint32_t GnuLookup(const SymName& name) const;
-    uint32_t LinearLookup(const SymName& name) const;
+    uint32_t SysVLookup(const SymName& name) const;
 
 public:
     explicit Elf(uintptr_t base_addr);
     void FindPltAddr(const char* name, AddrList& res) const;
+    int GetExactProtection(uintptr_t addr) const;
     bool Valid() const { return valid_; }
 };

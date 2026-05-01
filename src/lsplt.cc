@@ -1,5 +1,4 @@
 #include "include/lsplt.hpp"
-#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
@@ -44,7 +43,7 @@ struct FastList {
     FastList& operator=(const FastList&) = delete;
     void reserve(size_t n) {
         if (n > capacity) {
-            void* nd = memalloc(data, size, n, sizeof(T), true);
+            void* nd = memalloc(data, size, n, sizeof(T));
             if (nd) { data = static_cast<T*>(nd); capacity = n; }
         }
     }
@@ -97,7 +96,7 @@ public:
 
     __attribute__((noinline))
     static auto CreateTargetsFromMemoryMaps(lsplt::MapInfoList &maps) {
-        static ino_t kSelfInode = 0; static dev_t kSelfDev = 0;
+        thread_local ino_t kSelfInode = 0; thread_local dev_t kSelfDev = 0;
         HookInfos info; info.data.reserve(maps.size);
 
         auto process_maps = [&](bool find_self) __attribute__((always_inline)) {
@@ -136,6 +135,7 @@ public:
                 new_size++;
             }
         }
+        for (size_t i = new_size; i < data.size; i++) { data.data[i].~HookInfo(); }
         data.size = new_size;
     }
 
@@ -193,7 +193,8 @@ public:
         auto restore_page_prot = [&]() {
             if (pg_unprot) {
                 if (clr_s) __builtin___clear_cache(reinterpret_cast<char*>(clr_s), reinterpret_cast<char*>(clr_e));
-                lsplt::sys::mprotect(reinterpret_cast<void*>(cur_pg), lsplt::sys::SysPageSize(), info.perms);
+                int exact_perms = info.elf ? info.elf->GetExactProtection(cur_pg) : -1;
+                lsplt::sys::mprotect(reinterpret_cast<void*>(cur_pg), lsplt::sys::SysPageSize(), exact_perms != -1 ? exact_perms : info.perms);
             }
         };
 
@@ -206,7 +207,9 @@ public:
                 uintptr_t pg_s = (uintptr_t)PageStart(p.addr);
                 if (pg_s != cur_pg) {
                     restore_page_prot();
-                    if (lsplt::sys::mprotect((void*)pg_s, lsplt::sys::SysPageSize(), (info.perms & ~PROT_EXEC) | PROT_WRITE) == 0) {
+                    int exact_perms = info.elf ? info.elf->GetExactProtection(pg_s) : -1;
+                    int base_perms = exact_perms != -1 ? exact_perms : info.perms;
+                    if (lsplt::sys::mprotect((void*)pg_s, lsplt::sys::SysPageSize(), (base_perms & ~PROT_EXEC) | PROT_WRITE) == 0) {
                         cur_pg = pg_s; pg_unprot = true; clr_s = clr_e = 0;
                     } else { res = false; continue; }
                 }
@@ -219,10 +222,7 @@ public:
             }
             bool found = false;
             for (size_t k = 0; k < info.hooks.size; k++) {
-                if (info.hooks.data[k].addr == p.addr) {
-                    info.hooks.data[k].orig_ptr = p.callback;
-                    found = true; break;
-                }
+                if (info.hooks.data[k].addr == p.addr) { found = true; break; }
             }
             if (!found) info.hooks.push_back({p.addr, t_bkp});
         }
@@ -296,26 +296,11 @@ public:
 
     __attribute__((noinline))
     bool ProcessRequest(FastList<HookRequest> &reg_info) {
-        // Step 1: Locate and initialize the ELF headers of the libraries 
-        // so that symbol lookup is ready.
-        for (size_t i = 0; i < data.size; i++) {
-            if (!data.data[i].elf) {
-                // It will only be valid if the segment actually starts with an ELF header
-                data.data[i].elf = new Elf(data.data[i].start);
-            }
-        }
-
-        // Step 2: Pre-calculate the PLT addresses for each hook request.
+        // Pre-calculate the PLT addresses for each hook request.
         struct CachedAddr {
             Elf::AddrList p_addr;
             bool found;
-
             CachedAddr() : found(false) {}
-            ~CachedAddr() {
-                if (p_addr.data) {
-                    free(p_addr.data);
-                }
-            }
             CachedAddr(const CachedAddr&) = delete;
             CachedAddr& operator=(const CachedAddr&) = delete;
             CachedAddr(CachedAddr&& o) noexcept : found(o.found) {
@@ -327,9 +312,7 @@ public:
             }
             CachedAddr& operator=(CachedAddr&& o) noexcept {
                 if (this != &o) {
-                    if (p_addr.data) {
-                        free(p_addr.data);
-                    }
+                    if (p_addr.data) free(p_addr.data); 
                     p_addr.data = o.p_addr.data;
                     p_addr.size = o.p_addr.size;
                     p_addr.capacity = o.p_addr.capacity;
@@ -347,9 +330,12 @@ public:
             auto& reg = reg_info.data[j];
             HookInfo* base_hi = nullptr;
             for (size_t k = 0; k < data.size; k++) {
-                if (data.data[k].Match(reg) && data.data[k].elf && data.data[k].elf->Valid()) {
-                    base_hi = &data.data[k];
-                    break;
+                if (data.data[k].Match(reg)) {
+                    if (!data.data[k].elf) { data.data[k].elf = new Elf(data.data[k].start); }
+                    if (data.data[k].elf->Valid()) {
+                        base_hi = &data.data[k];
+                        break;
+                    }
                 }
             }
 
@@ -363,7 +349,7 @@ public:
             cached_results.push_back(static_cast<CachedAddr&&>(result));
         }
 
-        // Step 3: We iterate each memory segment and check if any of
+        // We iterate each memory segment and check if any of
         // the requested PLT addresses physically fall within it.
         bool res = ApplyPatches([&](HookInfo& hi, FastList<PendingPatch>& patches, size_t i) {
             bool ok = true;
@@ -408,13 +394,10 @@ static HookInfos* g_state = nullptr;
 namespace lsplt {
 inline namespace v2 {
 
-struct DlIterateData { MapInfoList *info; char c_path[PATH_MAX]; bool c_ok; ino_t c_ino; dev_t c_dev; char exe[PATH_MAX]; bool exe_ok; };
+struct DlIterateData { MapInfoList *info; char c_path[PATH_MAX]; bool c_ok; ino_t c_ino; dev_t c_dev; char exe[PATH_MAX]; };
 static int DlIterateCallback(struct dl_phdr_info *info, size_t, void *data) {
     auto *d = (DlIterateData *)data; const char *n = info->dlpi_name;
-    if (!n || n[0] == '\0') {
-        if (!d->exe_ok) { ssize_t l = readlink("/proc/self/exe", d->exe, sizeof(d->exe)-1); if (l != -1) d->exe[l] = '\0'; else d->exe[0] = '\0'; d->exe_ok = true; }
-        n = d->exe;
-    }
+    if (!n || n[0] == '\0') n = d->exe;
     ino_t ino = 0; dev_t dev = 0;
     if (n && n[0] == '/') {
         const char *ex = __builtin_strstr(n, "!/");
@@ -426,13 +409,12 @@ static int DlIterateCallback(struct dl_phdr_info *info, size_t, void *data) {
                     dev = d->c_dev;
                 }
             } else {
-                char cn[PATH_MAX];
-                size_t c_len = MIN_VAL(len, sizeof(cn) - 1);
-                __builtin_memcpy(cn, n, c_len);
-                cn[c_len] = '\0';
-                __builtin_memcpy(d->c_path, cn, c_len + 1);
+                size_t c_len = MIN_VAL(len, sizeof(d->c_path) - 1);
+                __builtin_memcpy(d->c_path, n, c_len);
+                d->c_path[c_len] = '\0';
+
                 struct stat st;
-                if (stat(cn, &st) == 0) {
+                if (stat(d->c_path, &st) == 0) {
                     ino = st.st_ino;
                     dev = st.st_dev;
                     d->c_ino = ino;
@@ -465,7 +447,9 @@ static int DlIterateCallback(struct dl_phdr_info *info, size_t, void *data) {
 
 MapInfoList Scan() {
     MapInfoList info; DlIterateData d; 
-    d.info = &info; d.c_path[0] = '\0'; d.c_ok = d.exe_ok = false;
+    d.info = &info; d.c_path[0] = '\0'; d.c_ok = false;
+    ssize_t l = readlink("/proc/self/exe", d.exe, sizeof(d.exe)-1); 
+    if (l != -1) d.exe[l] = '\0'; else d.exe[0] = '\0';
     dl_iterate_phdr(DlIterateCallback, &d);
     return info;
 }
