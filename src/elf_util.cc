@@ -30,19 +30,10 @@
 #define ELF_R_TYPE(i) ELF32_R_TYPE(i)
 #endif
 
-namespace {
-    inline __attribute__((always_inline)) bool MatchSym(const SymName& n, const char* s) {
-        return s[0] == n.name[0] && __builtin_strcmp(n.name, s) == 0;
-    }
-}
-
 __attribute__((noinline))
 Elf::Elf(uintptr_t base_addr) : base_addr_(base_addr) {
     header_ = reinterpret_cast<ElfW(Ehdr)*>(base_addr);
-    if (ParseHeader() && ParseDynamicTable()) {
-        valid_ = true;
-        BuildRelocIndex();
-    }
+    if (ParseHeader() && ParseDynamicTable()) valid_ = true;
 }
 
 bool Elf::ParseHeader() {
@@ -96,49 +87,31 @@ bool Elf::ParseDynamicTable() {
     return dyn_str_ && dyn_sym_;
 }
 
-__attribute__((noinline, cold))
-void Elf::ProcessReloc(ElfW(Addr) begin, ElfW(Word) size, bool is_plt) {
-    if (!begin || !size) return;
-    size_t stride = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
-    uintptr_t end = begin + size;
-    
-    for (uintptr_t ptr = begin; ptr < end; ptr += stride) {
-        auto* r = reinterpret_cast<const ElfW(Rel)*>(ptr);
-        auto type = ELF_R_TYPE(r->r_info);
-        if (is_plt ? (type == R_JUMP_SLOT) : (type == R_ABS || type == R_GLOB_DAT)) {
-            ElfW(Addr) addr = bias_addr_ + r->r_offset;
-            if (addr > base_addr_) (is_plt ? plt_relocs_ : dyn_relocs_).push_back({(uint32_t)ELF_R_SYM(r->r_info), addr});
-        }
-    }
-}
-
-__attribute__((noinline))
-void Elf::BuildRelocIndex() {
-    size_t r_sz = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
-    plt_relocs_.reserve(rel_plt_size_ / r_sz); 
-    dyn_relocs_.reserve(rel_dyn_size_ / r_sz);
-    ProcessReloc(rel_plt_, rel_plt_size_, true); 
-    ProcessReloc(rel_dyn_, rel_dyn_size_, false);
-}
-
 __attribute__((noinline))
 void Elf::FindPltAddr(const char* name, AddrList& res) const {
     res.clear(); 
-    SymName sn(name);
+    if (!valid_ || !name) return;
 
-    for (size_t i = 0; i < plt_relocs_.size; i++) {
-        uint32_t sym_idx = plt_relocs_.data[i].sym;
-        if (MatchSym(sn, dyn_str_ + dyn_sym_[sym_idx].st_name)) {
-            res.push_back(plt_relocs_.data[i].addr);
+    auto search_table = [&](ElfW(Addr) begin, ElfW(Word) size, bool is_plt) {
+        if (!begin || !size) return;
+        size_t stride = is_use_rela_ ? sizeof(ElfW(Rela)) : sizeof(ElfW(Rel));
+        uintptr_t end = begin + size;
+        for (uintptr_t ptr = begin; ptr < end; ptr += stride) {
+            auto* r = reinterpret_cast<const ElfW(Rel)*>(ptr);
+            auto type = ELF_R_TYPE(r->r_info);
+            if (is_plt ? (type == R_JUMP_SLOT) : (type == R_ABS || type == R_GLOB_DAT)) {
+                uint32_t sym_idx = ELF_R_SYM(r->r_info);
+                const char* sym_name = dyn_str_ + dyn_sym_[sym_idx].st_name;
+                if (sym_name[0] == name[0] && __builtin_strcmp(sym_name, name) == 0) {
+                    ElfW(Addr) addr = bias_addr_ + r->r_offset;
+                    if (addr > base_addr_) res.push_back(addr);
+                }
+            }
         }
-    }
-    
-    for (size_t i = 0; i < dyn_relocs_.size; i++) {
-        uint32_t sym_idx = dyn_relocs_.data[i].sym;
-        if (MatchSym(sn, dyn_str_ + dyn_sym_[sym_idx].st_name)) {
-            res.push_back(dyn_relocs_.data[i].addr);
-        }
-    }
+    };
+
+    search_table(rel_plt_, rel_plt_size_, true);
+    search_table(rel_dyn_, rel_dyn_size_, false);
 }
 
 __attribute__((noinline))

@@ -6,6 +6,9 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+namespace lsplt {
+inline namespace v2 {
+
 static void* memalloc(void* old_data, size_t old_size, size_t new_cap, size_t elem_size) {
     if (old_size > new_cap) return nullptr;
     size_t alloc_size;
@@ -19,8 +22,6 @@ static void* memalloc(void* old_data, size_t old_size, size_t new_cap, size_t el
     return new_data;
 }
 
-namespace lsplt {
-inline namespace v2 {
 template <typename T>
 struct FastList {
     T* data = nullptr;
@@ -51,7 +52,7 @@ struct FastList {
     FastList& operator=(const FastList&) = delete;
     void reserve(size_t n) {
         if (n > capacity) {
-            void* nd = memalloc(data, size, n, sizeof(T));
+            void* nd = lsplt::memalloc(data, size, n, sizeof(T));
             if (nd) {
                 data = static_cast<T*>(nd);
                 capacity = n;

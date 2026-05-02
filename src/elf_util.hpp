@@ -4,16 +4,7 @@
 #include <stdlib.h> // malloc, free
 #include "include/lsplt.hpp"
 
-struct SymName {
-    const char* name;
-    explicit SymName(const char* n) : name(n) {}
-};
-
 class Elf {
-    struct Reloc { uint32_t sym; ElfW(Addr) addr; };
-
-    using RelocList = lsplt::FastList<Reloc>;
-
 public:
     using AddrList = lsplt::FastList<uintptr_t>;
 
@@ -31,10 +22,7 @@ private:
     ElfW(Word) rel_plt_size_ = 0, rel_dyn_size_ = 0, dynamic_size_ = 0;
 
     bool is_use_rela_ = false, valid_ = false;
-    RelocList plt_relocs_, dyn_relocs_;
 
-    void ProcessReloc(ElfW(Addr) begin, ElfW(Word) size, bool is_plt);
-    void BuildRelocIndex();
     bool ParseHeader();
     bool ParseDynamicTable();
 

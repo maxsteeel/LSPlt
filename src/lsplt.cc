@@ -44,15 +44,13 @@ inline auto PageStart(uintptr_t a) {
 struct HookInfo : public lsplt::MapInfo {
     lsplt::FastList<ActiveHook> hooks;
     Elf* elf = nullptr;
-    bool self;
     HookInfo() = default;
-    HookInfo(const lsplt::MapInfo& map, bool is_self) : lsplt::MapInfo(map), self(is_self) {}
+    HookInfo(const lsplt::MapInfo& map) : lsplt::MapInfo(map) {}
     ~HookInfo() { delete elf; }
     HookInfo(HookInfo&& o) noexcept
         : lsplt::MapInfo(o),
           hooks(static_cast<lsplt::FastList<ActiveHook>&&>(o.hooks)),
-          elf(o.elf),
-          self(o.self) {
+          elf(o.elf) {
         o.elf = nullptr;
     }
     HookInfo& operator=(HookInfo&& o) noexcept {
@@ -61,7 +59,6 @@ struct HookInfo : public lsplt::MapInfo {
             hooks = static_cast<lsplt::FastList<ActiveHook>&&>(o.hooks);
             delete elf;
             elf = o.elf;
-            self = o.self;
             o.elf = nullptr;
         }
         return *this;
@@ -76,33 +73,25 @@ public:
 
     __attribute__((noinline)) static auto CreateTargetsFromMemoryMaps(
         lsplt::MapInfoList& maps, const lsplt::FastList<HookRequest>& reg_info) {
-        thread_local ino_t kSelfInode = 0;
-        thread_local dev_t kSelfDev = 0;
         HookInfos info;
         info.data.reserve(reg_info.size * 4);
-        const uintptr_t self_addr =
-            (kSelfInode == 0) ? reinterpret_cast<uintptr_t>(__builtin_return_address(0)) : 0;
+
         for (size_t i = 0; i < maps.size; i++) {
             auto& map = maps.data[i];
-            if (kSelfInode == 0 && self_addr >= map.start && self_addr < map.end) {
-                kSelfInode = map.inode;
-                kSelfDev = map.dev;
-            }
             if (map.inode == 0 || !map.is_private || !(map.perms & PROT_READ) ||
                 map.path[0] == '\0' || map.path[0] == '[')
                 continue;
-            bool is_self = (map.inode == kSelfInode && map.dev == kSelfDev);
-            bool keep = is_self;
-            if (!keep) {
-                for (size_t j = 0; j < reg_info.size; j++) {
-                    if (map.dev == reg_info.data[j].dev && map.inode == reg_info.data[j].inode) {
-                        keep = true;
-                        break;
-                    }
+
+            bool keep = false;
+            for (size_t j = 0; j < reg_info.size; j++) {
+                if (map.dev == reg_info.data[j].dev && map.inode == reg_info.data[j].inode) {
+                    keep = true;
+                    break;
                 }
             }
+
             if (keep) {
-                HookInfo hi(map, is_self);
+                HookInfo hi(map);
                 info.data.push_back(static_cast<HookInfo&&>(hi));
             }
         }
@@ -324,26 +313,13 @@ static HookInfos* g_state = nullptr;
 namespace lsplt {
 inline namespace v2 {
 
-struct DlIterateData {
-    MapInfoList* info;
-    char exe[PATH_MAX];
-    char buf[PATH_MAX];
-};
 static int DlIterateCallback(struct dl_phdr_info* info, size_t, void* data) {
-    auto* d = (DlIterateData*)data;
+    auto* info_list = static_cast<MapInfoList*>(data);
     const char* n = info->dlpi_name;
-    if (!n || n[0] == '\0') n = d->exe;
-
     ino_t ino = 0;
     dev_t dev = 0;
+
     if (n && n[0] == '/') {
-        const char* ex = __builtin_strstr(n, "!/");
-        if (ex) {
-            size_t len = MIN_VAL((size_t)(ex - n), sizeof(d->buf) - 1);
-            __builtin_memcpy(d->buf, n, len);
-            d->buf[len] = '\0';
-            n = d->buf;
-        }
         struct stat st;
         if (stat(n, &st) == 0) {
             ino = st.st_ino;
@@ -369,15 +345,13 @@ static int DlIterateCallback(struct dl_phdr_info* info, size_t, void* data) {
             m.is_private = true;
             m.dev = dev;
             m.inode = ino;
-
-            if (c_len >= sizeof(m.path))
+            if (c_len >= sizeof(m.path)) {
                 m.path[0] = '\0';
-            else {
+            } else {
                 __builtin_memcpy(m.path, c_str, c_len);
                 m.path[c_len] = '\0';
             }
-
-            d->info->push_back(m);
+            info_list->push_back(m);
         }
     }
     return 0;
@@ -385,14 +359,7 @@ static int DlIterateCallback(struct dl_phdr_info* info, size_t, void* data) {
 
 MapInfoList Scan() {
     MapInfoList info;
-    DlIterateData d;
-    d.info = &info;
-    ssize_t l = readlink("/proc/self/exe", d.exe, sizeof(d.exe) - 1);
-    if (l != -1)
-        d.exe[l] = '\0';
-    else
-        d.exe[0] = '\0';
-    dl_iterate_phdr(DlIterateCallback, &d);
+    dl_iterate_phdr(DlIterateCallback, &info);
     return info;
 }
 
