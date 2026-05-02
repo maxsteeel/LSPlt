@@ -72,7 +72,7 @@ public:
     lsplt::FastList<HookInfo> data;
 
     __attribute__((noinline)) static auto CreateTargetsFromMemoryMaps(
-        lsplt::MapInfoList& maps, const lsplt::FastList<HookRequest>& reg_info) {
+        lsplt::MapInfoList& maps, const lsplt::FastList<HookRequest>& reg_info, HookInfos* old_state) {
         HookInfos info;
         info.data.reserve(reg_info.size * 4);
 
@@ -95,26 +95,26 @@ public:
                 info.data.push_back(static_cast<HookInfo&&>(hi));
             }
         }
-        return info;
-    }
 
-    __attribute__((noinline)) void Merge(HookInfos& old) {
-        if (old.data.empty()) return;
-        for (size_t i = 0; i < data.size; i++) {
-            for (size_t j = 0; j < old.data.size; j++) {
-                if (data.data[i].start == old.data.data[j].start) {
-                    data.data[i].elf = old.data.data[j].elf;
-                    old.data.data[j].elf = nullptr;
-                    data.data[i].hooks =
-                        static_cast<lsplt::FastList<ActiveHook>&&>(old.data.data[j].hooks);
-                    break;
+        if (old_state && !old_state->data.empty()) {
+            for (size_t i = 0; i < info.data.size; i++) {
+                for (size_t j = 0; j < old_state->data.size; j++) {
+                    if (info.data.data[i].start == old_state->data.data[j].start) {
+                        info.data.data[i].elf = old_state->data.data[j].elf;
+                        old_state->data.data[j].elf = nullptr;
+                        info.data.data[i].hooks =
+                            static_cast<lsplt::FastList<ActiveHook>&&>(old_state->data.data[j].hooks);
+                        break;
+                    }
                 }
             }
+            for (size_t j = 0; j < old_state->data.size; j++) {
+                if (!old_state->data.data[j].hooks.empty()) 
+                    info.data.push_back(static_cast<HookInfo&&>(old_state->data.data[j]));
+            }
         }
-        for (size_t j = 0; j < old.data.size; j++) {
-            if (!old.data.data[j].hooks.empty()) 
-                data.push_back(static_cast<HookInfo&&>(old.data.data[j]));
-        }
+
+        return info;
     }
 
     __attribute__((noinline)) bool BatchPatchPLTEntries(HookInfo& info,
@@ -371,13 +371,12 @@ bool RegisterHook(dev_t d, ino_t i, const char* s, void* c, void** b) {
 bool CommitHook(MapInfoList& m, bool u) {
     const MutexGuard lock(&g_mtx);
     if (!g_pend || g_pend->empty()) return true;
-    auto n = HookInfos::CreateTargetsFromMemoryMaps(m, *g_pend);
+    auto n = HookInfos::CreateTargetsFromMemoryMaps(m, *g_pend, g_state);
     if (n.data.empty()) {
         g_pend->clear();
         return false;
     }
     if (!g_state) g_state = new HookInfos();
-    n.Merge(*g_state);
     *g_state = static_cast<HookInfos&&>(n);
     bool res = u ? g_state->RestoreFunction(*g_pend) : g_state->ProcessRequest(*g_pend);
     g_pend->clear();
