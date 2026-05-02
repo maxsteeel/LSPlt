@@ -121,69 +121,58 @@ public:
                                                         lsplt::FastList<PendingPatch>& patches) {
         if (patches.empty()) return true;
 
-        uintptr_t cur_pg = 0, clr_s = 0, clr_e = 0;
-        int cur_perms = 0;
-        bool pg_unprot = false, res = true;
+        uintptr_t min_addr = ~(uintptr_t)0;
+        uintptr_t max_addr = 0;
+        for (size_t i = 0; i < patches.size; i++) {
+            min_addr = MIN_VAL(min_addr, patches.data[i].addr);
+            max_addr = MAX_VAL(max_addr, patches.data[i].addr + sizeof(uintptr_t));
+        }
+        uintptr_t pg_start = (uintptr_t)PageStart(min_addr);
+        uintptr_t pg_end = (uintptr_t)PageStart(max_addr - 1) + lsplt::sys::SysPageSize();
+        size_t len = pg_end - pg_start;
+        void* temp = lsplt::sys::mmap(nullptr, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+        if (temp == MAP_FAILED) return false;
 
-        auto restore_page_prot = [&]() {
-            if (pg_unprot) {
-                if (clr_s)
-                    __builtin___clear_cache(reinterpret_cast<char*>(clr_s),
-                                            reinterpret_cast<char*>(clr_e));
-                lsplt::sys::mprotect(reinterpret_cast<void*>(cur_pg), lsplt::sys::SysPageSize(),
-                                     cur_perms);
-            }
-        };
-
+        __builtin_memcpy(temp, (void*)pg_start, len);
+        bool res = true;
         info.hooks.reserve(info.hooks.size + patches.size);
+
         for (size_t i = 0; i < patches.size; i++) {
             const auto& p = patches.data[i];
-            auto* t_addr = reinterpret_cast<uintptr_t*>(p.addr);
+            auto* real_addr = reinterpret_cast<uintptr_t*>(p.addr);
+            auto t_bkp = *real_addr; 
 
-            uintptr_t pg_s = (uintptr_t)PageStart(p.addr);
-            if (pg_s != cur_pg) {
-                restore_page_prot();
-                int exact_perms = info.elf ? info.elf->GetExactProtection(pg_s) : -1;
-                cur_perms = exact_perms != -1 ? exact_perms : info.perms;
-
-                if (lsplt::sys::mprotect((void*)pg_s, lsplt::sys::SysPageSize(),
-                                         (cur_perms & ~PROT_EXEC) | PROT_WRITE | PROT_READ) == 0) {
-                    cur_pg = pg_s;
-                    pg_unprot = true;
-                    clr_s = clr_e = 0;
-                } else {
-                    res = false;
-                    continue; // Skip silently if mprotect fails
-                }
+            if (t_bkp != p.callback) {
+                uintptr_t offset = p.addr - pg_start;
+                uintptr_t* temp_ptr = (uintptr_t*)((uintptr_t)temp + offset);
+                *temp_ptr = p.callback;
+                if (p.backup) *p.backup = t_bkp;
             }
 
-            if (pg_unprot) {
-                auto t_bkp = *t_addr; 
-                
-                if (t_bkp != p.callback) {
-                    *t_addr = p.callback;
-                    if (p.backup) *p.backup = t_bkp;
-                    if (!clr_s) {
-                        clr_s = p.addr;
-                        clr_e = p.addr + sizeof(uintptr_t);
-                    } else {
-                        clr_s = MIN_VAL(clr_s, p.addr);
-                        clr_e = MAX_VAL(clr_e, p.addr + sizeof(uintptr_t));
-                    }
+            bool found = false;
+            for (size_t k = 0; k < info.hooks.size; k++) {
+                if (info.hooks.data[k].addr == p.addr) {
+                    found = true;
+                    break;
                 }
-
-                // Track hook
-                bool found = false;
-                for (size_t k = 0; k < info.hooks.size; k++) {
-                    if (info.hooks.data[k].addr == p.addr) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) info.hooks.push_back({p.addr, t_bkp});
             }
+            if (!found) info.hooks.push_back({p.addr, t_bkp});
         }
-        restore_page_prot();
+
+        for (uintptr_t pg = 0; pg < len; pg += lsplt::sys::SysPageSize()) {
+            int exact_perms = info.elf ? info.elf->GetExactProtection(pg_start + pg) : -1;
+            int base_perms = exact_perms != -1 ? exact_perms : info.perms;
+            lsplt::sys::mprotect((void*)((uintptr_t)temp + pg), lsplt::sys::SysPageSize(), base_perms);
+        }
+
+        void* swapped = lsplt::sys::mremap(temp, len, len, MREMAP_MAYMOVE | MREMAP_FIXED, (void*)pg_start);
+        if (swapped == MAP_FAILED) {
+            lsplt::sys::munmap(temp, len);
+            res = false;
+        } else {
+            __builtin___clear_cache((char*)pg_start, (char*)pg_end);
+        }
+
         return res;
     }
 
