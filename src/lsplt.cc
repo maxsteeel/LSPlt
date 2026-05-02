@@ -36,71 +36,13 @@ struct HookRequest {
     void** backup;
 };
 
-template <typename T>
-struct FastList {
-    T* data = nullptr;
-    size_t size = 0;
-    size_t capacity = 0;
-    FastList() = default;
-    ~FastList() {
-        clear();
-        free(data);
-    }
-    FastList(FastList&& o) noexcept : data(o.data), size(o.size), capacity(o.capacity) {
-        o.data = nullptr;
-        o.size = o.capacity = 0;
-    }
-    FastList& operator=(FastList&& o) noexcept {
-        if (this != &o) {
-            clear();
-            free(data);
-            data = o.data;
-            size = o.size;
-            capacity = o.capacity;
-            o.data = nullptr;
-            o.size = o.capacity = 0;
-        }
-        return *this;
-    }
-    FastList(const FastList&) = delete;
-    FastList& operator=(const FastList&) = delete;
-    void reserve(size_t n) {
-        if (n > capacity) {
-            void* nd = memalloc(data, size, n, sizeof(T));
-            if (nd) {
-                data = static_cast<T*>(nd);
-                capacity = n;
-            }
-        }
-    }
-    void push_back(const T& val) {
-        if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
-        if (data) {
-            __builtin_memset(&data[size], 0, sizeof(T));
-            data[size++] = val;
-        }
-    }
-    void push_back(T&& val) {
-        if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
-        if (data) {
-            __builtin_memset((void*)&data[size], 0, sizeof(T));
-            data[size++] = static_cast<T&&>(val);
-        }
-    }
-    void clear() {
-        if (data)
-            for (size_t i = 0; i < size; i++) data[i].~T();
-        size = 0;
-    }
-    bool empty() const { return size == 0; }
-};
 
 inline auto PageStart(uintptr_t a) {
     return reinterpret_cast<char*>(a & lsplt::sys::SysPageMask());
 }
 
 struct HookInfo : public lsplt::MapInfo {
-    FastList<ActiveHook> hooks;
+    lsplt::FastList<ActiveHook> hooks;
     uintptr_t backup = 0;
     Elf* elf = nullptr;
     bool self;
@@ -111,7 +53,7 @@ struct HookInfo : public lsplt::MapInfo {
 
     HookInfo(HookInfo&& o) noexcept
         : lsplt::MapInfo(o),
-          hooks(static_cast<FastList<ActiveHook>&&>(o.hooks)),
+          hooks(static_cast<lsplt::FastList<ActiveHook>&&>(o.hooks)),
           backup(o.backup),
           elf(o.elf),
           self(o.self) {
@@ -120,7 +62,7 @@ struct HookInfo : public lsplt::MapInfo {
     HookInfo& operator=(HookInfo&& o) noexcept {
         if (this != &o) {
             lsplt::MapInfo::operator=(o);
-            hooks = static_cast<FastList<ActiveHook>&&>(o.hooks);
+            hooks = static_cast<lsplt::FastList<ActiveHook>&&>(o.hooks);
             backup = o.backup;
             delete elf;
             elf = o.elf;
@@ -135,10 +77,10 @@ struct HookInfo : public lsplt::MapInfo {
 
 class HookInfos {
 public:
-    FastList<HookInfo> data;
+    lsplt::FastList<HookInfo> data;
 
     __attribute__((noinline)) static auto CreateTargetsFromMemoryMaps(
-        lsplt::MapInfoList& maps, const FastList<HookRequest>& reg_info) {
+        lsplt::MapInfoList& maps, const lsplt::FastList<HookRequest>& reg_info) {
         thread_local ino_t kSelfInode = 0;
         thread_local dev_t kSelfDev = 0;
         HookInfos info;
@@ -181,7 +123,7 @@ public:
                     data.data[i].elf = old.data.data[j].elf;
                     old.data.data[j].elf = nullptr;
                     data.data[i].hooks =
-                        static_cast<FastList<ActiveHook>&&>(old.data.data[j].hooks);
+                        static_cast<lsplt::FastList<ActiveHook>&&>(old.data.data[j].hooks);
                     old.data.data[j].backup = 0;
                     break;
                 }
@@ -193,7 +135,7 @@ public:
     }
 
     __attribute__((noinline)) bool BatchPatchPLTEntries(HookInfo& info,
-                                                        FastList<PendingPatch>& patches) {
+                                                        lsplt::FastList<PendingPatch>& patches) {
         if (patches.empty()) return true;
         const auto len = info.end - info.start;
         if (!info.backup && !info.self) {
@@ -296,7 +238,7 @@ public:
     template <typename MatchLogic>
     __attribute__((noinline)) bool ApplyPatches(MatchLogic match_logic, bool is_restore = false) {
         bool res = true;
-        FastList<PendingPatch> patches;
+        lsplt::FastList<PendingPatch> patches;
 
         for (size_t i = 0; i < data.size; i++) {
             auto& hi = data.data[i];
@@ -339,10 +281,10 @@ public:
         return res;
     }
 
-    __attribute__((noinline)) bool RestoreFunction(FastList<HookRequest>& reg_info) {
+    __attribute__((noinline)) bool RestoreFunction(lsplt::FastList<HookRequest>& reg_info) {
         if (reg_info.empty()) return true;
         return ApplyPatches(
-            [&](HookInfo& hi, FastList<PendingPatch>& patches) {
+            [&](HookInfo& hi, lsplt::FastList<PendingPatch>& patches) {
                 if (hi.hooks.empty()) return true;
                 for (size_t k = 0; k < reg_info.size; k++) {
                     auto& req = reg_info.data[k];
@@ -362,7 +304,7 @@ public:
             true);
     }
 
-    __attribute__((noinline)) bool ProcessRequest(FastList<HookRequest>& reg_info) {
+    __attribute__((noinline)) bool ProcessRequest(lsplt::FastList<HookRequest>& reg_info) {
         // Pre-calculate the PLT addresses for each hook request.
         Elf::AddrList* cached_addrs = new Elf::AddrList[reg_info.size];
 
@@ -389,7 +331,7 @@ public:
 
         // We iterate each memory segment and check if any of
         // the requested PLT addresses physically fall within it.
-        bool res = ApplyPatches([&](HookInfo& hi, FastList<PendingPatch>& patches) {
+        bool res = ApplyPatches([&](HookInfo& hi, lsplt::FastList<PendingPatch>& patches) {
             bool ok = true;
             for (size_t j = 0; j < reg_info.size; j++) {
                 auto& reg = reg_info.data[j];
@@ -423,7 +365,7 @@ struct MutexGuard {
     ~MutexGuard() { pthread_mutex_unlock(m); }
 };
 
-static FastList<HookRequest>* g_pend = nullptr;
+static lsplt::FastList<HookRequest>* g_pend = nullptr;
 static HookInfos* g_state = nullptr;
 
 }  // anonymous namespace
@@ -506,7 +448,7 @@ MapInfoList Scan() {
 bool RegisterHook(dev_t d, ino_t i, const char* s, void* c, void** b) {
     if (d == 0 || i == 0 || !s || s[0] == '\0' || !c) return false;
     const MutexGuard lock(&g_mtx);
-    if (!g_pend) g_pend = new FastList<HookRequest>();
+    if (!g_pend) g_pend = new lsplt::FastList<HookRequest>();
     HookRequest r;
     r.dev = d;
     r.inode = i;

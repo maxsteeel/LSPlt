@@ -12,52 +12,10 @@ struct SymName {
 class Elf {
     struct Reloc { uint32_t sym; ElfW(Addr) addr; };
 
-    struct RelocList {
-        Reloc* data = nullptr;
-        size_t size = 0;
-        size_t capacity = 0;
-        ~RelocList() { if (data) free(data); }
-        RelocList() = default;
-        RelocList(const RelocList&) = delete;
-        RelocList& operator=(const RelocList&) = delete;
-        void reserve(size_t n) {
-            if (n > capacity) {
-                void* nd = memalloc(data, size, n, sizeof(Reloc));
-                if (nd) { data = static_cast<Reloc*>(nd); capacity = n; }
-            }
-        }
-        void push_back(Reloc r) {
-            if (size >= capacity) {
-                size_t n = capacity == 0 ? 64 : capacity * 2;
-                void* nd = memalloc(data, size, n, sizeof(Reloc));
-                if (nd) { data = static_cast<Reloc*>(nd); capacity = n; }
-                else return;
-            }
-            data[size++] = r;
-        }
-    };
+    using RelocList = lsplt::FastList<Reloc>;
 
 public:
-    struct AddrList {
-        uintptr_t* data = nullptr;
-        size_t size = 0;
-        size_t capacity = 0;
-        ~AddrList() { if (data) free(data); }
-        AddrList() = default;
-        AddrList(const AddrList&) = delete;
-        AddrList& operator=(const AddrList&) = delete;
-        void push_back(uintptr_t addr) {
-            if (size >= capacity) {
-                size_t n = capacity == 0 ? 4 : capacity * 2;
-                void* nd = memalloc(data, size, n, sizeof(uintptr_t));
-                if (nd) { data = static_cast<uintptr_t*>(nd); capacity = n; }
-                else return;
-            }
-            data[size++] = addr;
-        }
-        void clear() { size = 0; }
-        bool empty() const { return size == 0; }
-    };
+    using AddrList = lsplt::FastList<uintptr_t>;
 
 private:
     ElfW(Addr) base_addr_ = 0, bias_addr_ = 0;

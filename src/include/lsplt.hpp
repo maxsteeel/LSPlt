@@ -21,6 +21,65 @@ static void* memalloc(void* old_data, size_t old_size, size_t new_cap, size_t el
 
 namespace lsplt {
 inline namespace v2 {
+template <typename T>
+struct FastList {
+    T* data = nullptr;
+    size_t size = 0;
+    size_t capacity = 0;
+    FastList() = default;
+    ~FastList() {
+        clear();
+        free(data);
+    }
+    FastList(FastList&& o) noexcept : data(o.data), size(o.size), capacity(o.capacity) {
+        o.data = nullptr;
+        o.size = o.capacity = 0;
+    }
+    FastList& operator=(FastList&& o) noexcept {
+        if (this != &o) {
+            clear();
+            free(data);
+            data = o.data;
+            size = o.size;
+            capacity = o.capacity;
+            o.data = nullptr;
+            o.size = o.capacity = 0;
+        }
+        return *this;
+    }
+    FastList(const FastList&) = delete;
+    FastList& operator=(const FastList&) = delete;
+    void reserve(size_t n) {
+        if (n > capacity) {
+            void* nd = memalloc(data, size, n, sizeof(T));
+            if (nd) {
+                data = static_cast<T*>(nd);
+                capacity = n;
+            }
+        }
+    }
+    void push_back(const T& val) {
+        if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
+        if (size < capacity) {
+            __builtin_memset(&data[size], 0, sizeof(T));
+            data[size++] = val;
+        }
+    }
+    void push_back(T&& val) {
+        if (size >= capacity) reserve(capacity == 0 ? 8 : capacity * 2);
+        if (size < capacity) {
+            __builtin_memset((void*)&data[size], 0, sizeof(T));
+            data[size++] = static_cast<T&&>(val);
+        }
+    }
+    void clear() {
+        if (data)
+            for (size_t i = 0; i < size; i++) data[i].~T();
+        size = 0;
+    }
+    bool empty() const { return size == 0; }
+};
+
 struct MapInfo {
     uintptr_t start;
     uintptr_t end;
@@ -32,42 +91,7 @@ struct MapInfo {
     char path[PATH_MAX];
 };
 
-struct MapInfoList {
-    MapInfo* data = nullptr;
-    size_t size = 0;
-    size_t capacity = 0;
-    MapInfoList() = default;
-    MapInfoList(const MapInfoList&) = delete;
-    MapInfoList& operator=(const MapInfoList&) = delete;
-    MapInfoList(MapInfoList&& o) noexcept : data(o.data), size(o.size), capacity(o.capacity) {
-        o.data = nullptr; 
-        o.size = o.capacity = 0;
-    }
-    MapInfoList& operator=(MapInfoList&& o) noexcept {
-        if (this != &o) { 
-            if (data) free(data); 
-            data = o.data; 
-            size = o.size; 
-            capacity = o.capacity; 
-            o.data = nullptr; 
-            o.size = o.capacity = 0; 
-        }
-        return *this;
-    }
-    ~MapInfoList() { 
-        if (data) free(data); 
-    }
-    void push_back(const MapInfo& m) {
-        if (size >= capacity) {
-            size_t n = capacity == 0 ? 64 : capacity * 2;
-            void* nd = memalloc(data, size, n, sizeof(MapInfo));
-            if (nd) { data = static_cast<MapInfo*>(nd); capacity = n; }
-            else return;
-        }
-        data[size++] = m;
-    }
-    void clear() { size = 0; }
-};
+using MapInfoList = FastList<MapInfo>;
 
 [[maybe_unused, gnu::visibility("default")]] MapInfoList Scan();
 [[maybe_unused, gnu::visibility("default")]] bool RegisterHook(dev_t dev, ino_t inode, const char* symbol, void *callback, void **backup);
