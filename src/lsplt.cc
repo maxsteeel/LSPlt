@@ -43,18 +43,14 @@ inline auto PageStart(uintptr_t a) {
 
 struct HookInfo : public lsplt::MapInfo {
     lsplt::FastList<ActiveHook> hooks;
-    uintptr_t backup = 0;
     Elf* elf = nullptr;
     bool self;
-
     HookInfo() = default;
     HookInfo(const lsplt::MapInfo& map, bool is_self) : lsplt::MapInfo(map), self(is_self) {}
     ~HookInfo() { delete elf; }
-
     HookInfo(HookInfo&& o) noexcept
         : lsplt::MapInfo(o),
           hooks(static_cast<lsplt::FastList<ActiveHook>&&>(o.hooks)),
-          backup(o.backup),
           elf(o.elf),
           self(o.self) {
         o.elf = nullptr;
@@ -63,7 +59,6 @@ struct HookInfo : public lsplt::MapInfo {
         if (this != &o) {
             lsplt::MapInfo::operator=(o);
             hooks = static_cast<lsplt::FastList<ActiveHook>&&>(o.hooks);
-            backup = o.backup;
             delete elf;
             elf = o.elf;
             self = o.self;
@@ -118,63 +113,25 @@ public:
         if (old.data.empty()) return;
         for (size_t i = 0; i < data.size; i++) {
             for (size_t j = 0; j < old.data.size; j++) {
-                if (data.data[i].start == old.data.data[j].start && old.data.data[j].backup) {
-                    data.data[i].backup = old.data.data[j].backup;
+                if (data.data[i].start == old.data.data[j].start) {
                     data.data[i].elf = old.data.data[j].elf;
                     old.data.data[j].elf = nullptr;
                     data.data[i].hooks =
                         static_cast<lsplt::FastList<ActiveHook>&&>(old.data.data[j].hooks);
-                    old.data.data[j].backup = 0;
                     break;
                 }
             }
         }
         for (size_t j = 0; j < old.data.size; j++) {
-            if (old.data.data[j].backup) data.push_back(static_cast<HookInfo&&>(old.data.data[j]));
+            if (!old.data.data[j].hooks.empty()) 
+                data.push_back(static_cast<HookInfo&&>(old.data.data[j]));
         }
     }
 
     __attribute__((noinline)) bool BatchPatchPLTEntries(HookInfo& info,
                                                         lsplt::FastList<PendingPatch>& patches) {
         if (patches.empty()) return true;
-        const auto len = info.end - info.start;
-        if (!info.backup && !info.self) {
-            void* bkp = lsplt::sys::mmap(nullptr, len, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
-            if (bkp == MAP_FAILED) return false;
-            if (lsplt::sys::mremap(reinterpret_cast<void*>(info.start), len, len,
-                                   MREMAP_FIXED | MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
-                                   bkp) == MAP_FAILED) {
-                if (lsplt::sys::mprotect(bkp, len, PROT_READ | PROT_WRITE) != 0 ||
-                    lsplt::sys::mprotect(reinterpret_cast<void*>(info.start), len,
-                                         info.perms | PROT_READ) != 0) {
-                    lsplt::sys::munmap(bkp, len);
-                    return false;
-                }
-                __builtin_memcpy(bkp, reinterpret_cast<void*>(info.start), len);
-                lsplt::sys::mprotect(reinterpret_cast<void*>(info.start), len, info.perms);
-                lsplt::sys::mprotect(bkp, len, info.perms);
-                __builtin___clear_cache((char*)bkp, (char*)bkp + len);
-            }
-            int fd =
-                lsplt::sys::call<int>(SYS_openat, AT_FDCWD, (long)info.path, O_RDONLY | O_CLOEXEC);
-            void* nw = (fd >= 0)
-                           ? lsplt::sys::mmap(reinterpret_cast<void*>(info.start), len,
-                                              (info.perms & ~PROT_EXEC) | PROT_READ | PROT_WRITE,
-                                              MAP_PRIVATE | MAP_FIXED, fd, info.offset)
-                           : MAP_FAILED;
-            if (fd >= 0) lsplt::sys::call(SYS_close, fd);
-            if (nw == MAP_FAILED)
-                nw = lsplt::sys::mmap(reinterpret_cast<void*>(info.start), len,
-                                      (info.perms & ~PROT_EXEC) | PROT_READ | PROT_WRITE,
-                                      MAP_PRIVATE | MAP_FIXED | MAP_ANON, -1, 0);
-            if (nw == MAP_FAILED) {
-                lsplt::sys::munmap(bkp, len);
-                return false;
-            }
-            __builtin_memcpy(reinterpret_cast<void*>(info.start), bkp, len);
-            lsplt::sys::mprotect(reinterpret_cast<void*>(info.start), len, info.perms);
-            info.backup = (uintptr_t)bkp;
-        }
+
         uintptr_t cur_pg = 0, clr_s = 0, clr_e = 0;
         int cur_perms = 0;
         bool pg_unprot = false, res = true;
@@ -193,24 +150,28 @@ public:
         for (size_t i = 0; i < patches.size; i++) {
             const auto& p = patches.data[i];
             auto* t_addr = reinterpret_cast<uintptr_t*>(p.addr);
-            auto t_bkp = *t_addr;
-            if (*t_addr != p.callback) {
-                uintptr_t pg_s = (uintptr_t)PageStart(p.addr);
-                if (pg_s != cur_pg) {
-                    restore_page_prot();
-                    int exact_perms = info.elf ? info.elf->GetExactProtection(pg_s) : -1;
-                    cur_perms = exact_perms != -1 ? exact_perms : info.perms;
-                    if (lsplt::sys::mprotect((void*)pg_s, lsplt::sys::SysPageSize(),
-                                             (cur_perms & ~PROT_EXEC) | PROT_WRITE) == 0) {
-                        cur_pg = pg_s;
-                        pg_unprot = true;
-                        clr_s = clr_e = 0;
-                    } else {
-                        res = false;
-                        continue;
-                    }
+
+            uintptr_t pg_s = (uintptr_t)PageStart(p.addr);
+            if (pg_s != cur_pg) {
+                restore_page_prot();
+                int exact_perms = info.elf ? info.elf->GetExactProtection(pg_s) : -1;
+                cur_perms = exact_perms != -1 ? exact_perms : info.perms;
+
+                if (lsplt::sys::mprotect((void*)pg_s, lsplt::sys::SysPageSize(),
+                                         (cur_perms & ~PROT_EXEC) | PROT_WRITE | PROT_READ) == 0) {
+                    cur_pg = pg_s;
+                    pg_unprot = true;
+                    clr_s = clr_e = 0;
+                } else {
+                    res = false;
+                    continue; // Skip silently if mprotect fails
                 }
-                if (pg_unprot) {
+            }
+
+            if (pg_unprot) {
+                auto t_bkp = *t_addr; 
+                
+                if (t_bkp != p.callback) {
                     *t_addr = p.callback;
                     if (p.backup) *p.backup = t_bkp;
                     if (!clr_s) {
@@ -221,15 +182,17 @@ public:
                         clr_e = MAX_VAL(clr_e, p.addr + sizeof(uintptr_t));
                     }
                 }
-            }
-            bool found = false;
-            for (size_t k = 0; k < info.hooks.size; k++) {
-                if (info.hooks.data[k].addr == p.addr) {
-                    found = true;
-                    break;
+
+                // Track hook
+                bool found = false;
+                for (size_t k = 0; k < info.hooks.size; k++) {
+                    if (info.hooks.data[k].addr == p.addr) {
+                        found = true;
+                        break;
+                    }
                 }
+                if (!found) info.hooks.push_back({p.addr, t_bkp});
             }
-            if (!found) info.hooks.push_back({p.addr, t_bkp});
         }
         restore_page_prot();
         return res;
@@ -244,7 +207,6 @@ public:
             auto& hi = data.data[i];
             patches.clear();
 
-            // match_logic returns false if an error occurred during matching
             if (!match_logic(hi, patches)) {
                 res = false;
             }
@@ -264,17 +226,6 @@ public:
                         if (!removed) hi.hooks.data[new_hooks++] = hi.hooks.data[k];
                     }
                     hi.hooks.size = new_hooks;
-
-                    if (hi.hooks.empty() && !hi.self && hi.backup) {
-                        const auto len = hi.end - hi.start;
-                        if (lsplt::sys::mremap((void*)hi.backup, len, len,
-                                               MREMAP_FIXED | MREMAP_MAYMOVE,
-                                               (void*)hi.start) != MAP_FAILED) {
-                            hi.backup = 0;
-                        } else {
-                            res = false;
-                        }
-                    }
                 }
             }
         }
@@ -301,7 +252,7 @@ public:
                 }
                 return true;
             },
-            true);
+            true); // is_restore = true
     }
 
     __attribute__((noinline)) bool ProcessRequest(lsplt::FastList<HookRequest>& reg_info) {
